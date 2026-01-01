@@ -1,15 +1,8 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Any, Dict, List, Optional
 
 
-def _ensure_lists(state: dict):
-    state.setdefault("messages", [])
-    state.setdefault("executed", [])
-
-
-BANNED_KEYWORDS = [
+_BANNED_KEYWORDS = {
     "терроризм",
     "бомбу",
     "взорвать",
@@ -19,9 +12,9 @@ BANNED_KEYWORDS = [
     "наркотики",
     "оружие",
     "пароль",
-]
+}
 
-PROMPT_INJECTION_PATTERNS = [
+_PROMPT_INJECTION_PATTERNS = [
     "ignore previous instructions",
     "ignore prior instructions",
     "forget previous instructions",
@@ -35,6 +28,11 @@ PROMPT_INJECTION_PATTERNS = [
 ]
 
 
+def _ensure_lists(state: dict):
+    state.setdefault("messages", [])
+    state.setdefault("executed", [])
+
+
 def _extract_last_user_content(state: dict) -> str:
     for msg in reversed(state.get("messages", [])):
         if msg.get("role") == "user":
@@ -42,11 +40,53 @@ def _extract_last_user_content(state: dict) -> str:
     return ""
 
 
-def _check_unsafe_and_injection(text: str) -> dict[str, bool]:
+def _check_unsafe_and_injection(text: str) -> Dict[str, bool]:
     lowered = text.lower()
-    rules_unsafe = any(bad in lowered for bad in BANNED_KEYWORDS)
-    rules_injection = any(pat in lowered for pat in PROMPT_INJECTION_PATTERNS)
+    rules_unsafe = any(keyword in lowered for keyword in _BANNED_KEYWORDS)
+    rules_injection = any(pattern in lowered for pattern in _PROMPT_INJECTION_PATTERNS)
     return {"unsafe": rules_unsafe, "injection_suspected": rules_injection}
+
+
+def _format_tools(tools: List[dict], is_rag: bool) -> List[dict]:
+    filtered = [
+        tool for tool in tools
+        if is_rag or tool.get("name") != "knowledge_search"
+    ]
+    return filtered
+
+
+def create_agent_prompt(tools: List[dict], is_rag: bool = True) -> str:
+    filtered_tools = _format_tools(tools, is_rag)
+    if filtered_tools:
+        tool_lines = [
+            f"- `{tool['name']}`: {tool.get('description', 'без описания')}."
+            for tool in filtered_tools
+        ]
+        tools_section = "**ДОСТУПНЫЕ ИНСТРУМЕНТЫ:**\n" + "\n".join(tool_lines)
+    else:
+        tools_section = (
+            "**У тебя нет доступных инструментов.** "
+            "Отвечай на основе истории и знаний."
+        )
+
+    base_instruction = (
+        "Ты — умный исследователь. Анализируй запрос и выбирай, нужны ли инструменты."
+    )
+
+    if is_rag and filtered_tools:
+        rag_extra = (
+            "\n**RAG-ИНСТРУКЦИЯ:** При необходимости вызывай `knowledge_search` "
+            "для фактов, цен и адресов. Не вызывай его для приветствий."
+        )
+    else:
+        rag_extra = (
+            "\n**ПРАВИЛА:** Не используй `knowledge_search`, если RAG отключен "
+            "или вопрос прост. Сфокусируйся на логике и кратком ответе."
+        )
+
+    return f"{base_instruction}\n\n{tools_section}\n\n{rag_extra}"
+
+
 def safety_in_node(state: dict) -> dict:
     _ensure_lists(state)
     state["executed"].append("safety_in")
@@ -69,16 +109,16 @@ def safety_router_condition(state: dict) -> str:
 def safety_block_node(state: dict) -> dict:
     _ensure_lists(state)
     state["executed"].append("safety_block")
-    text = "Я не могу ответить на этот запрос. Пожалуйста, уточните другой вопрос."
+    text = "Я не могу ответить на этот запрос."
     if state.get("unsafe"):
         text = (
             "Запрос нарушает политику безопасности. "
-            "Уточните вопрос про услуги, цены или запись."
+            "Уточните вопрос про услуги или запись."
         )
     elif state.get("injection_suspected"):
         text = (
-            "Похоже, вы пытаетесь обойти правила. "
-            "Я могу ответить только в рамках политики."
+            "Нельзя обходить правила. "
+            "Я могу ответить только в рамках политики безопасности."
         )
     state["answer"] = {"text": text, "format": "plain"}
     return state
@@ -87,9 +127,11 @@ def safety_block_node(state: dict) -> dict:
 def agent_node(state: dict) -> dict:
     _ensure_lists(state)
     state["executed"].append("agent")
-    text = (state["messages"][-1].get("content") if state["messages"] else "") or ""
-    state["plan"] = "answer"
-    state["wants_retrieve"] = "факт" in text.lower()
+    tools = state.get("tools") or []
+    is_rag = bool(state.get("is_rag", True))
+    state["agent_prompt"] = create_agent_prompt(tools, is_rag=is_rag)
+    state["filtered_tools"] = _format_tools(tools, is_rag)
+    state["wants_retrieve"] = bool(state["filtered_tools"]) and is_rag
     return state
 
 
@@ -100,7 +142,7 @@ def tool_router_condition(state: dict) -> str:
 def tool_executor_node(state: dict) -> dict:
     _ensure_lists(state)
     state["executed"].append("retrieve")
-    state["context"] = "Контекст: найден факт про продукт."
+    state["context"] = "Контекст: найден факт."
     return state
 
 

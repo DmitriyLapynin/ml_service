@@ -4,10 +4,12 @@ from ai_domain.agent.graph import build_agent_graph
 from ai_domain.agent.nodes import AgentNodes
 
 
-def make_state(text: str) -> dict:
+def make_state(text: str, tools=None) -> dict:
     return {
         "trace_id": "t-test",
         "messages": [{"role": "user", "content": text}],
+        "tools": tools or [{"name": "knowledge_search", "description": "найди факт"}],
+        "is_rag": True,
     }
 
 
