@@ -40,6 +40,7 @@ class LLMRouter:
             top_p=req.top_p,
             seed=req.seed,
             stop=req.stop,
+            credentials=req.credentials,
             metadata=req.metadata,
         )
 
@@ -66,6 +67,7 @@ class LLMRouter:
                     top_p=req.top_p,
                     seed=req.seed,
                     stop=req.stop,
+                    credentials=req.credentials,
                     metadata=req.metadata,
                 )
 

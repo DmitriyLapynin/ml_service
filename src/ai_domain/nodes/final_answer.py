@@ -1,4 +1,4 @@
-from ai_domain.llm.types import LLMMessage, LLMRequest
+from ai_domain.llm.types import LLMCredentials, LLMMessage, LLMRequest
 
 class FinalAnswerNode:
     def __init__(self, llm, prompt_repo, telemetry):
@@ -20,11 +20,18 @@ class FinalAnswerNode:
             *[LLMMessage(**m) for m in state.messages],
         ]
 
+        credentials = getattr(state, "credentials", None)
+        llm_credentials = None
+        if isinstance(credentials, dict):
+            llm_credentials = LLMCredentials(openai_api_key=credentials.get("openai_api_key"))
+        else:
+            llm_credentials = credentials
+
         req = LLMRequest(
             messages=messages,
             model=state.versions["model"],
             max_output_tokens=state.policies["max_output_tokens"],
-            credentials=state.credentials,
+            credentials=llm_credentials,
             metadata={"trace_id": state.trace_id},
         )
 
