@@ -6,7 +6,7 @@ from typing import Optional, Any
 from ai_domain.llm.base import LLMProvider
 from ai_domain.llm.types import LLMRequest, LLMResponse, LLMUsage
 from ai_domain.llm.errors import (
-    LLMTimeout, LLMRateLimit, LLMUnavailable, LLMInvalidRequest, LLMProviderError
+    LLMTimeout, LLMRateLimited, LLMUnavailable, LLMInvalidRequest, LLMProviderError
 )
 from ai_domain.llm.client_cache import TTLRUClientCache
 
@@ -101,7 +101,7 @@ class OpenAIProvider(LLMProvider):
             # Здесь подставь свой детектор типов ошибок SDK.
             msg = str(e).lower()
             if "rate limit" in msg or "429" in msg:
-                raise LLMRateLimit(str(e))
+                raise LLMRateLimited(str(e))
             if "timeout" in msg:
                 raise LLMTimeout(str(e))
             if "invalid" in msg or "bad request" in msg or "400" in msg:
