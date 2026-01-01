@@ -54,6 +54,9 @@ from ai_domain.llm.types import LLMMessage, LLMRequest
 from ai_domain.orchestrator.context_builder import normalize_messages
 from ai_domain.orchestrator.service import Orchestrator
 from ai_domain.registry.static_prompt_repo import StaticPromptRepo
+from ai_domain.registry.prompts import PromptRepository
+from ai_domain.registry.supabase_connector import create_supabase_client_from_env
+from ai_domain.secrets import get_secret
 
 from ai_domain.telemetry.noop import NoOpTelemetry
 from dataclasses import dataclass
@@ -151,16 +154,22 @@ class GraphWrapper:
 
 
 def make_deps(llm):
-    # Важно: ключи промптов должны совпадать с тем, что ожидают узлы.
-    # Если у тебя узлы читают только system/analysis/tool — оставь минимум.
-    prompt_repo = StaticPromptRepo(
-        {
-            "system_prompt": PROMPTS["system_prompt"],
-            "analysis_prompt": PROMPTS["analysis_prompt"],
-            "tool_prompt": PROMPTS["tool_prompt"],
-            "final_prompt": PROMPTS["final_prompt"],
-        }
-    )
+    # Если заданы SUPABASE_URL/SUPABASE_KEY — используем Supabase как источник промптов.
+    # Иначе — fallback на статические PROMPTS из этого файла.
+    if get_secret("SUPABASE_URL") and get_secret("SUPABASE_KEY"):
+        sb = create_supabase_client_from_env()
+        prompt_repo = PromptRepository(sb)
+    else:
+        # Важно: ключи промптов должны совпадать с тем, что ожидают узлы.
+        # Если у тебя узлы читают только system/analysis/tool — оставь минимум.
+        prompt_repo = StaticPromptRepo(
+            {
+                "system_prompt": PROMPTS["system_prompt"],
+                "analysis_prompt": PROMPTS["analysis_prompt"],
+                "tool_prompt": PROMPTS["tool_prompt"],
+                "final_prompt": PROMPTS["final_prompt"],
+            }
+        )
 
     return Deps(
         llm=llm,
@@ -172,7 +181,7 @@ def make_deps(llm):
 
 
 def build_live_router_llm():
-    provider = OpenAIProvider(platform_api_key=os.environ["OPENAI_API_KEY"])
+    provider = OpenAIProvider(platform_api_key=get_secret("OPENAI_API_KEY", required=True))
     router = LLMRouter(
         providers={"openai": provider},
         route=ModelRoute(
@@ -187,8 +196,7 @@ def build_live_router_llm():
 
 
 async def main():
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Set OPENAI_API_KEY")
+    # Проверка вынесена на get_secret(required=True) в build_live_router_llm().
 
     from ai_domain.graphs.main_graph import build_graph
 
