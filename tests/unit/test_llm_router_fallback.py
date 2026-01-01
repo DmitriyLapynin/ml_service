@@ -7,7 +7,7 @@ from ai_domain.llm.errors import LLMUnavailable, LLMTimeout
 
 @pytest.mark.asyncio
 async def test_router_uses_primary_when_ok(base_request):
-    from conftest import FakeLLMProvider
+    from tests.conftest import FakeLLMProvider
 
     primary = FakeLLMProvider(name="openai", script=["primary_ok"])
     fallback = FakeLLMProvider(name="local", script=["fallback_ok"])

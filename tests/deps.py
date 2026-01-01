@@ -4,6 +4,7 @@ from typing import Any
 
 @dataclass
 class TestDeps:
+    __test__ = False  # чтобы pytest не пытался собирать класс как тест
     """
     Контейнер зависимостей для build_graph(deps).
 
@@ -14,3 +15,4 @@ class TestDeps:
     prompt_repo: Any
     rag_client: Any
     telemetry: Any
+    tool_executor: Any | None = None

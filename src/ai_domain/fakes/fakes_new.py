@@ -16,13 +16,41 @@ class FakeLLM:
         self._raise = raise_exc
         self.calls: List[Dict[str, Any]] = []
 
-    async def generate(self, *, messages, model=None, max_output_tokens=256, temperature=0.2):
-        self.calls.append(
-            {"messages": messages, "model": model, "max_output_tokens": max_output_tokens, "temperature": temperature}
-        )
+    async def generate(self, *args, **kwargs):
+        """
+        Поддерживает оба стиля вызова:
+        - generate(req)
+        - generate(messages=..., model=..., ...)
+        """
+        if args and len(args) == 1 and not kwargs:
+            req = args[0]
+            # LLMRequest-подобный объект
+            payload = {
+                "messages": getattr(req, "messages", None),
+                "model": getattr(req, "model", None),
+                "max_output_tokens": getattr(req, "max_output_tokens", None),
+                "temperature": getattr(req, "temperature", None),
+            }
+        else:
+            payload = {
+                "messages": kwargs.get("messages"),
+                "model": kwargs.get("model"),
+                "max_output_tokens": kwargs.get("max_output_tokens"),
+                "temperature": kwargs.get("temperature"),
+            }
+
+        self.calls.append(payload)
         if self._raise:
             raise self._raise
         return FakeLLMResponse(content=self._content)
+
+    async def decide_tool(self, req) -> None:
+        """
+        В тестах по умолчанию никакой tool не вызываем.
+        Реальные решения покрываются отдельными тестами tools_loop.
+        """
+        self.calls.append({"decide_tool": req})
+        return None
 
 
 class FakePromptRepo:
@@ -56,3 +84,12 @@ class FakeTelemetry:
 
     def log_step(self, *, trace_id: str | None, node: str, meta: Dict[str, Any]):
         self.steps.append({"trace_id": trace_id, "node": node, "meta": meta})
+
+
+class FakeToolExecutor:
+    def __init__(self):
+        self.calls: List[Dict[str, Any]] = []
+
+    async def execute(self, tool_name: str, args: Dict[str, Any], state) -> Dict[str, Any]:
+        self.calls.append({"tool_name": tool_name, "args": args, "state_trace": getattr(state, 'trace_id', None)})
+        return {"status": "ok", "tool": tool_name}
