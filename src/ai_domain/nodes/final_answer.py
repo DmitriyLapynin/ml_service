@@ -1,4 +1,5 @@
 from ai_domain.llm.types import LLMCredentials, LLMMessage, LLMRequest
+from ai_domain.utils.memory import select_memory_messages
 
 class FinalAnswerNode:
     def __init__(self, llm, prompt_repo, telemetry):
@@ -15,9 +16,16 @@ class FinalAnswerNode:
             version=version,
         )
 
+        role_instruction = getattr(state, "role_instruction", None)
+        prompt = getattr(state, "prompt", None)
+        if role_instruction:
+            system_prompt = f"{system_prompt}\n\nРоль:\n{role_instruction}"
+        if prompt:
+            system_prompt = f"{system_prompt}\n\nИнструкция:\n{prompt}"
+
         messages = [
             LLMMessage(role="system", content=system_prompt),
-            *[LLMMessage(**m) for m in state.messages],
+            *[LLMMessage(**m) for m in select_memory_messages(state)],
         ]
 
         credentials = getattr(state, "credentials", None)
@@ -27,10 +35,13 @@ class FinalAnswerNode:
         else:
             llm_credentials = credentials
 
+        policies = getattr(state, "policies", {}) or {}
         req = LLMRequest(
             messages=messages,
             model=state.versions["model"],
-            max_output_tokens=state.policies["max_output_tokens"],
+            max_output_tokens=policies.get("max_output_tokens"),
+            temperature=policies.get("temperature", 0.2),
+            top_p=policies.get("top_p"),
             credentials=llm_credentials,
             metadata={"trace_id": state.trace_id},
         )

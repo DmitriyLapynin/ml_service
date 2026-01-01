@@ -30,6 +30,7 @@ class FakeLLM:
                 "model": getattr(req, "model", None),
                 "max_output_tokens": getattr(req, "max_output_tokens", None),
                 "temperature": getattr(req, "temperature", None),
+                "top_p": getattr(req, "top_p", None),
             }
         else:
             payload = {
@@ -37,6 +38,7 @@ class FakeLLM:
                 "model": kwargs.get("model"),
                 "max_output_tokens": kwargs.get("max_output_tokens"),
                 "temperature": kwargs.get("temperature"),
+                "top_p": kwargs.get("top_p"),
             }
 
         self.calls.append(payload)

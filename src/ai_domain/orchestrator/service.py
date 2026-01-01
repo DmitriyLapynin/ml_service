@@ -51,6 +51,26 @@ class Orchestrator:
 
             credentials = self._decrypt_credentials(request.get("credentials"))
 
+            model_params = request.get("model_params") or {}
+
+            # request overrides (API layer)
+            if request.get("is_rag") is not None:
+                policies["rag_enabled"] = bool(request["is_rag"])
+
+            model_override = request.get("model")
+            if model_override:
+                versions["model"] = str(model_override)
+
+            policies_with_model = dict(policies)
+            policies_with_model.setdefault("temperature", 0.2)
+            if "temperature" in model_params:
+                policies_with_model["temperature"] = float(model_params["temperature"])
+            if "top_p" in model_params:
+                policies_with_model["top_p"] = float(model_params["top_p"])
+            else:
+                policies_with_model.pop("top_p", None)
+            if "max_output_tokens" in model_params:
+                policies_with_model["max_output_tokens"] = model_params["max_output_tokens"]
 
             # 4️⃣ Build graph state
             state = build_graph_state(
@@ -59,8 +79,16 @@ class Orchestrator:
                 channel=request["channel"],
                 messages=request["messages"],
                 versions=versions,
-                policies=policies,
+                policies=policies_with_model,
                 credentials=credentials,
+                prompt=request.get("prompt"),
+                role_instruction=request.get("role_instruction"),
+                is_rag=request.get("is_rag"),
+                tools=request.get("tools"),
+                funnel_id=request.get("funnel_id"),
+                memory_strategy=request.get("memory_strategy"),
+                memory_params=request.get("memory_params"),
+                model_params=model_params,
                 trace_id=trace_id,
             )
 

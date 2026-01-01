@@ -156,9 +156,11 @@ class GraphWrapper:
 def make_deps(llm):
     # Если заданы SUPABASE_URL/SUPABASE_KEY — используем Supabase как источник промптов.
     # Иначе — fallback на статические PROMPTS из этого файла.
-    if get_secret("SUPABASE_URL") and get_secret("SUPABASE_KEY"):
-        sb = create_supabase_client_from_env()
-        prompt_repo = PromptRepository(sb)
+    # if get_secret("SUPABASE_URL") and get_secret("SUPABASE_KEY"):
+    #     sb = create_supabase_client_from_env()
+    #     prompt_repo = PromptRepository(sb)
+    if False:
+        pass
     else:
         # Важно: ключи промптов должны совпадать с тем, что ожидают узлы.
         # Если у тебя узлы читают только system/analysis/tool — оставь минимум.

@@ -12,7 +12,22 @@ class PromptRepository:
         self.ttl = ttl_seconds
         self._cache: Dict[Tuple[str, str], tuple[str, float]] = {}
 
-    def get_prompt(self, *, prompt_key: str, version: str) -> str:
+    def get_prompt(self, *args, **kwargs) -> str:
+        """
+        Compatibility wrapper for different call styles used across nodes:
+        - get_prompt(prompt_key, version, channel="chat")
+        - get_prompt(prompt_key="...", version="...", channel="chat")
+        """
+        if args:
+            prompt_key = args[0]
+            version = args[1] if len(args) > 1 else None
+        else:
+            prompt_key = kwargs.get("prompt_key")
+            version = kwargs.get("version")
+
+        if not prompt_key or not version:
+            raise ValueError("prompt_key and version are required")
+
         cache_key = (prompt_key, version)
         now = time.time()
 

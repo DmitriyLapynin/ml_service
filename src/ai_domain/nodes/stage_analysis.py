@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from ai_domain.utils.memory import select_memory_messages
+
 
 class StageAnalysisError(Exception):
     pass
@@ -44,16 +46,22 @@ class StageAnalysisNode:
         )
 
         # messages у тебя список dict(role, content)
-        messages = getattr(state, "messages", []) or []
-        llm_messages = [{"role": "system", "content": system_prompt}, *messages]
+        memory_messages = select_memory_messages(state)
+        llm_messages = [{"role": "system", "content": system_prompt}, *memory_messages]
+
+        policies = getattr(state, "policies", {}) or {}
+        llm_kwargs = {
+            "messages": llm_messages,
+            "model": versions.get("model") or None,
+            "max_output_tokens": policies.get("max_output_tokens", 256),
+            "temperature": policies.get("temperature", 0.2),
+        }
+        top_p = policies.get("top_p")
+        if top_p is not None:
+            llm_kwargs["top_p"] = top_p
 
         try:
-            resp = await self.llm.generate(
-                messages=llm_messages,
-                model=versions.get("model") or None,
-                max_output_tokens=(getattr(state, "policies", {}) or {}).get("max_output_tokens", 256),
-                temperature=(getattr(state, "policies", {}) or {}).get("temperature", 0.2),
-            )
+            resp = await self.llm.generate(**llm_kwargs)
         except Exception as e:
             runtime["degraded"] = True
             runtime["errors"].append({"node": "stage_analysis", "type": "llm_error", "msg": str(e)})

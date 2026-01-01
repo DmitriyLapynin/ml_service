@@ -30,5 +30,5 @@ async def test_agent_graph_blocked():
 
     assert out.get("blocked") is True
     assert out.get("answer") is not None
-    assert "отклон" in out["answer"]["text"].lower()
+    assert "нарушает" in out["answer"]["text"].lower()
     assert out["executed"] == ["safety_in", "safety_block"]
