@@ -1,0 +1,36 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+logs/
+*.log
+
+# Env
+.env
+.env.*
+
+# Build
+dist/
+build/
+out/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Java
+target/
+
+# Misc
+*.tmp
+*.bak

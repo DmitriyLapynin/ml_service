@@ -1,0 +1,34 @@
+[project]
+name = "ai-domain"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Лапынин Дмитрий Олегович",email = "lapynindo@fsk.ru"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph (>=1.0.5,<2.0.0)"
+]
+
+[tool.poetry]
+name = "ai-domain"
+version = "0.1.0"
+packages = [{ include = "ai_domain", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0.0"
+
+
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
