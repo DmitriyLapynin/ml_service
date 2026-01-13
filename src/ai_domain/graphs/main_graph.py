@@ -33,7 +33,7 @@ def build_graph(*, deps) -> object:
         "router",
         route_selector,
         {
-            "chat": "chat_stage_analysis",
+            "chat": "chat_memory_summary",
             "email": "email_compose",
             "voice": "voice_stage_light",
         },

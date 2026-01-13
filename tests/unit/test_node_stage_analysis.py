@@ -1,6 +1,7 @@
 import pytest
 
 from ai_domain.nodes.stage_analysis import StageAnalysisNode
+from ai_domain.orchestrator.policy_resolver import build_task_configs
 
 
 class FakePromptRepo:
@@ -9,7 +10,10 @@ class FakePromptRepo:
 
 
 class FakeLLM:
-    async def generate(self, messages, model=None, max_output_tokens=256, temperature=0.2):
+    async def generate(self, *args, **kwargs):
+        class R:
+            content = '{"stage":"closing","rag_suggested": true, "signals":{"target_yes":true}}'
+        return R()
         class R:
             content = '{"stage":"closing","rag_suggested": true, "signals":{"target_yes":true}}'
         return R()
@@ -21,6 +25,12 @@ class State:
         self.messages = [{"role": "user", "content": "hi"}]
         self.versions = {"analysis_prompt": "1.0", "model": "fake"}
         self.policies = {"max_output_tokens": 100}
+        self.task_configs = build_task_configs(
+            versions=self.versions,
+            policies=self.policies,
+            model_override=None,
+            model_params={},
+        )
         self.runtime = {}
         self.stage = None
         self.trace_id = "t1"

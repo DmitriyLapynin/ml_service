@@ -16,7 +16,8 @@ def test_create_agent_prompt_includes_tools():
     assert "knowledge_search" in prompt
 
 
-def test_agent_node_filters_tools_when_rag_disabled():
+@pytest.mark.asyncio
+async def test_agent_node_filters_tools_when_rag_disabled():
     state = _make_state(
         tools=[
             {"name": "knowledge_search", "description": "doc"},
@@ -25,16 +26,17 @@ def test_agent_node_filters_tools_when_rag_disabled():
         is_rag=False,
     )
 
-    out = agent_node(state)
+    out = await agent_node(state)
     assert "knowledge_search" not in [t["name"] for t in out["filtered_tools"]]
     assert out["wants_retrieve"] is False
 
 
-def test_agent_node_builds_prompt_based_on_tools():
+@pytest.mark.asyncio
+async def test_agent_node_builds_prompt_based_on_tools():
     state = _make_state(
         tools=[{"name": "knowledge_search", "description": "doc"}],
         is_rag=True,
     )
-    out = agent_node(state)
+    out = await agent_node(state)
     assert out["wants_retrieve"] is True
     assert "knowledge_search" in out["agent_prompt"]

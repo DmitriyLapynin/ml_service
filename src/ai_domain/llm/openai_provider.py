@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Any
 
 from ai_domain.llm.base import LLMProvider
-from ai_domain.llm.types import LLMRequest, LLMResponse, LLMUsage
+from ai_domain.llm.types import LLMRequest, LLMResponse, LLMUsage, LLMCapabilities
 from ai_domain.llm.errors import (
     LLMTimeout, LLMRateLimited, LLMUnavailable, LLMInvalidRequest, LLMProviderError
 )
@@ -19,6 +19,11 @@ class OpenAIProvider(LLMProvider):
     - BYOK key (ключ на кампанию) через TTL/LRU in-memory cache
     """
     name: str = "openai"
+    capabilities: LLMCapabilities = LLMCapabilities(
+        supports_structured=True,
+        supports_tool_calls=True,
+        supports_seed=True,
+    )
     platform_api_key: Optional[str] = None
     byok_cache: Optional[TTLRUClientCache] = None
     timeout_s: float = 20.0

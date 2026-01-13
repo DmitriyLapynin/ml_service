@@ -42,3 +42,16 @@ def test_select_memory_messages_buffer_invalid_k():
     state.memory_params = {"k": 0}
 
     assert select_memory_messages(state) == state.messages
+
+
+def test_select_memory_messages_summary_includes_summary_and_recent():
+    state = _make_state()
+    state.memory_strategy = "summary"
+    state.memory_params = {"k": 1}
+    state.memory.summary = "previous summary"
+
+    selected = select_memory_messages(state)
+
+    assert selected[0]["role"] == "system"
+    assert "previous summary" in selected[0]["content"]
+    assert selected[-1]["content"] == "latest"

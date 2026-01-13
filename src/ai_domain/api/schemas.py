@@ -21,6 +21,10 @@ class ToolDescription(BaseModel):
 
 class ModelConfig(BaseModel):
     name: str = Field(default="gpt-4.1-mini", description="Model name (e.g. gpt-4.1-mini)")
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Model/runtime params (temperature, top_p, max_output_tokens, provider, seed, etc.)",
+    )
 
 
 class ChatRequest(BaseModel):

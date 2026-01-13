@@ -1,4 +1,6 @@
-from ai_domain.llm.types import LLMCredentials, LLMMessage, LLMRequest
+from ai_domain.llm.observability import build_llm_metadata
+from ai_domain.llm.types import LLMCredentials, LLMCallContext, LLMMessage, LLMRequest
+from ai_domain.orchestrator.tasks import get_task_config
 from ai_domain.utils.memory import select_memory_messages
 
 class FinalAnswerNode:
@@ -6,10 +8,12 @@ class FinalAnswerNode:
         self.llm = llm
         self.prompts = prompt_repo
         self.telemetry = telemetry
+        self.task_name = "final_answer"
 
     async def __call__(self, state):
         prompt_key = "system_prompt"
-        version = state.versions[prompt_key]
+        task_config = get_task_config(state, self.task_name)
+        version = task_config.prompt_versions.get(prompt_key) or "active"
 
         system_prompt = self.prompts.get_prompt(
             prompt_key=prompt_key,
@@ -35,18 +39,41 @@ class FinalAnswerNode:
         else:
             llm_credentials = credentials
 
-        policies = getattr(state, "policies", {}) or {}
+        llm_cfg = task_config.llm
+        prompt_vars = {}
+        if role_instruction:
+            prompt_vars["role_instruction"] = role_instruction
+        if prompt:
+            prompt_vars["prompt"] = prompt
+        metadata = {**(llm_cfg.metadata or {}), **build_llm_metadata(
+            state=state,
+            node_name="final_answer",
+            task=self.task_name,
+            prompt_key=prompt_key,
+            prompt_version=version,
+            prompt_vars=prompt_vars or None,
+        )}
+        context = LLMCallContext(
+            trace_id=getattr(state, "trace_id", None),
+            graph=getattr(state, "graph_name", None),
+            node=self.__class__.__name__,
+            task=self.task_name,
+            channel=getattr(state, "channel", None),
+            tenant_id=getattr(state, "tenant_id", None),
+            request_id=getattr(state, "request_id", None),
+        )
         req = LLMRequest(
             messages=messages,
-            model=state.versions["model"],
-            max_output_tokens=policies.get("max_output_tokens"),
-            temperature=policies.get("temperature", 0.2),
-            top_p=policies.get("top_p"),
+            model=llm_cfg.model,
+            max_output_tokens=int(llm_cfg.max_tokens),
+            temperature=llm_cfg.temperature,
+            top_p=llm_cfg.top_p,
+            seed=llm_cfg.seed,
             credentials=llm_credentials,
-            metadata={"trace_id": state.trace_id},
+            metadata=metadata,
         )
 
-        resp = await self.llm.generate(req)
+        resp = await self.llm.generate(req, context=context)
 
         state.answer = {"text": resp.content}
         state.stage = {"current": "final"}

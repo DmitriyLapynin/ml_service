@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
+from ai_domain.llm.observability import build_llm_metadata
+from ai_domain.llm.types import LLMCallContext, LLMMessage, LLMRequest
+from ai_domain.orchestrator.tasks import get_task_config
 from ai_domain.utils.memory import select_memory_messages
 
 
@@ -17,7 +20,7 @@ class StageAnalysisNode:
     prompt_repo: Any
     telemetry: Any | None = None
     prompt_key: str = "analysis_prompt"  # в Supabase prompt_versions
-    version_key: str = "analysis_prompt"  # ключ в state.versions
+    task_name: str = "stage_analysis"
 
     async def __call__(self, state) -> Any:
         runtime = getattr(state, "runtime", None) or {}
@@ -29,9 +32,8 @@ class StageAnalysisNode:
         runtime["executed"].append("stage_analysis")
 
         channel = getattr(state, "channel", "any")
-        versions: Dict[str, str] = getattr(state, "versions", {}) or {}
-
-        prompt_version = versions.get(self.version_key) or "active"
+        task_config = get_task_config(state, self.task_name)
+        prompt_version = task_config.prompt_versions.get(self.prompt_key) or "active"
         try:
             system_prompt = self.prompt_repo.get_prompt(self.prompt_key, prompt_version, channel=channel)
         except Exception as e:
@@ -49,19 +51,35 @@ class StageAnalysisNode:
         memory_messages = select_memory_messages(state)
         llm_messages = [{"role": "system", "content": system_prompt}, *memory_messages]
 
-        policies = getattr(state, "policies", {}) or {}
-        llm_kwargs = {
-            "messages": llm_messages,
-            "model": versions.get("model") or None,
-            "max_output_tokens": policies.get("max_output_tokens", 256),
-            "temperature": policies.get("temperature", 0.2),
-        }
-        top_p = policies.get("top_p")
-        if top_p is not None:
-            llm_kwargs["top_p"] = top_p
+        llm_cfg = task_config.llm
+        metadata = {**(llm_cfg.metadata or {}), **build_llm_metadata(
+            state=state,
+            node_name="stage_analysis",
+            task=self.task_name,
+            prompt_key=self.prompt_key,
+            prompt_version=prompt_version,
+        )}
+        context = LLMCallContext(
+            trace_id=getattr(state, "trace_id", None),
+            graph=getattr(state, "graph_name", None),
+            node=self.__class__.__name__,
+            task=self.task_name,
+            channel=getattr(state, "channel", None),
+            tenant_id=getattr(state, "tenant_id", None),
+            request_id=getattr(state, "request_id", None),
+        )
+        req = LLMRequest(
+            messages=[LLMMessage(role=m["role"], content=m["content"]) for m in llm_messages],
+            model=llm_cfg.model,
+            max_output_tokens=int(llm_cfg.max_tokens),
+            temperature=llm_cfg.temperature,
+            top_p=llm_cfg.top_p,
+            seed=llm_cfg.seed,
+            metadata=metadata,
+        )
 
         try:
-            resp = await self.llm.generate(**llm_kwargs)
+            resp = await self.llm.generate(req, context=context)
         except Exception as e:
             runtime["degraded"] = True
             runtime["errors"].append({"node": "stage_analysis", "type": "llm_error", "msg": str(e)})

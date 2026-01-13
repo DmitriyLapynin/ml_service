@@ -9,10 +9,31 @@ from ai_domain.fakes.fakes_new import (
 )
 from ai_domain.graphs.main_graph import build_graph
 from ai_domain.graphs.state import GraphState
+from ai_domain.orchestrator.policy_resolver import build_task_configs
 from tests.deps import TestDeps
 
 
 def make_state(channel: str) -> GraphState:
+    versions = {
+        "model": "fake",
+        "analysis_prompt": "v1",
+        "rag_config_id": "rc1",
+        "system_prompt": "v1",
+        "tool_prompt": "v1",
+        "memory_summary_prompt": "v1",
+    }
+    policies = {
+        "rag_enabled": True,
+        "rag_top_k": 2,
+        "max_output_tokens": 64,
+        "voice_ssml": False,
+    }
+    task_configs = build_task_configs(
+        versions=versions,
+        policies=policies,
+        model_override=None,
+        model_params={},
+    )
     return GraphState(
         trace_id="t1",
         tenant_id="tenant",
@@ -20,20 +41,10 @@ def make_state(channel: str) -> GraphState:
         channel=channel,
         route=None,
         messages=[{"role": "user", "content": "hi"}],
-        versions={
-            "model": "fake",
-            "analysis_prompt": "v1",
-            "rag_config_id": "rc1",
-            "system_prompt": "v1",
-            "tool_prompt": "v1",
-        },
-        policies={
-            "rag_enabled": True,
-            "rag_top_k": 2,
-            "max_output_tokens": 64,
-            "voice_ssml": False,
-        },
+        versions=versions,
+        policies=policies,
         credentials={"openai_api_key": "x"},
+        task_configs=task_configs,
         runtime={"executed": [], "errors": [], "degraded": False, "prompts_used": []},
         answer={"text": "", "format": "plain", "meta": {}},
         stage=None,

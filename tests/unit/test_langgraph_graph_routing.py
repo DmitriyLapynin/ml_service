@@ -60,6 +60,7 @@ def patch_graph_nodes(monkeypatch):
 
     # --- patch chat_flow node classes ---
     import ai_domain.graphs.chat_flow as chat_flow
+    monkeypatch.setattr(chat_flow, "SummarizeMemoryNode", lambda **kwargs: RecordingNode("chat_memory_summary"))
     monkeypatch.setattr(chat_flow, "StageAnalysisNode", lambda **kwargs: RecordingNode("chat_stage_analysis"))
     monkeypatch.setattr(chat_flow, "RagRetrieveNode", lambda **kwargs: RecordingNode("chat_rag_retrieve"))
     monkeypatch.setattr(chat_flow, "ToolsLoopNode", lambda **kwargs: RecordingNode("chat_tools_loop"))
@@ -90,6 +91,7 @@ async def test_graph_routes_to_chat_flow(monkeypatch):
 
     assert out["runtime"]["executed"] == [
         "router",
+        "chat_memory_summary",
         "chat_stage_analysis",
         "chat_rag_retrieve",
         "chat_tools_loop",

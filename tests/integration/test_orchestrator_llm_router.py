@@ -64,7 +64,8 @@ class RouterLLMAdapter:
         self.router = router
 
     async def generate(self, *args, **kwargs):
-        if args and len(args) == 1 and not kwargs:
+        _ = kwargs.pop("context", None)
+        if args and len(args) == 1:
             req = args[0]
         else:
             req = LLMRequest(

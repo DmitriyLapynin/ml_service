@@ -3,6 +3,7 @@ from typing import Any, Dict
 from uuid import uuid4
 
 from ai_domain.orchestrator.context_builder import build_graph_state
+from ai_domain.orchestrator.policy_resolver import PolicyBundle, build_task_configs
 
 
 class OrchestratorError(Exception):
@@ -45,9 +46,15 @@ class Orchestrator:
             )
 
             # 3️⃣ Resolve policies
-            policies = self.policy_resolver.resolve(
+            policy_result = self.policy_resolver.resolve(
                 channel=request["channel"],
             )
+            if isinstance(policy_result, PolicyBundle):
+                policies = dict(policy_result.policies)
+                task_configs = dict(policy_result.task_configs)
+            else:
+                policies = dict(policy_result or {})
+                task_configs = {}
 
             credentials = self._decrypt_credentials(request.get("credentials"))
 
@@ -62,6 +69,7 @@ class Orchestrator:
                 versions["model"] = str(model_override)
 
             policies_with_model = dict(policies)
+            policies_with_model["channel"] = request["channel"]
             policies_with_model.setdefault("temperature", 0.2)
             if "temperature" in model_params:
                 policies_with_model["temperature"] = float(model_params["temperature"])
@@ -72,6 +80,14 @@ class Orchestrator:
             if "max_output_tokens" in model_params:
                 policies_with_model["max_output_tokens"] = model_params["max_output_tokens"]
 
+            if not task_configs:
+                task_configs = build_task_configs(
+                    versions=versions,
+                    policies=policies_with_model,
+                    model_override=model_override,
+                    model_params=model_params,
+                )
+
             # 4️⃣ Build graph state
             state = build_graph_state(
                 tenant_id=request["tenant_id"],
@@ -81,15 +97,18 @@ class Orchestrator:
                 versions=versions,
                 policies=policies_with_model,
                 credentials=credentials,
+                task_configs=task_configs,
                 prompt=request.get("prompt"),
                 role_instruction=request.get("role_instruction"),
                 is_rag=request.get("is_rag"),
                 tools=request.get("tools"),
                 funnel_id=request.get("funnel_id"),
+                request_id=idempotency_key,
                 memory_strategy=request.get("memory_strategy"),
                 memory_params=request.get("memory_params"),
                 model_params=model_params,
                 trace_id=trace_id,
+                graph_name="main_graph",
             )
 
             # 5️⃣ Run graph

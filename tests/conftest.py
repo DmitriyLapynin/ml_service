@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, List
 
 from ai_domain.llm.base import LLMProvider
-from ai_domain.llm.types import LLMMessage, LLMRequest, LLMResponse, LLMUsage
+from ai_domain.llm.types import LLMMessage, LLMRequest, LLMResponse, LLMUsage, LLMCapabilities
 
 
 @pytest.fixture
@@ -32,6 +32,7 @@ class FakeLLMProvider(LLMProvider):
     name: str = "fake"
     script: List[Any] = None
     latency_ms: int = 1
+    capabilities: LLMCapabilities = LLMCapabilities()
 
     def __post_init__(self):
         if self.script is None:

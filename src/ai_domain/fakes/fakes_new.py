@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List, Optional, Type
+
+from pydantic import BaseModel
+
+from ai_domain.llm.types import StructuredResult
 
 
 @dataclass
@@ -22,7 +27,7 @@ class FakeLLM:
         - generate(req)
         - generate(messages=..., model=..., ...)
         """
-        if args and len(args) == 1 and not kwargs:
+        if args and len(args) == 1:
             req = args[0]
             # LLMRequest-подобный объект
             payload = {
@@ -53,6 +58,29 @@ class FakeLLM:
         """
         self.calls.append({"decide_tool": req})
         return None
+
+    async def invoke_structured(
+        self,
+        schema: Type[BaseModel],
+        messages: List[Dict[str, str]],
+        config: Any,
+        include_raw: bool = False,
+        context: Any | None = None,
+    ):
+        _ = context
+        # Reuse generate() to keep call logging consistent.
+        resp = await self.generate(
+            messages=messages,
+            model=getattr(config, "model", None),
+            max_output_tokens=getattr(config, "max_tokens", None),
+            temperature=getattr(config, "temperature", None),
+            top_p=getattr(config, "top_p", None),
+        )
+        parsed = json.loads(getattr(resp, "content", "") or "{}")
+        parsed_obj = schema(**parsed)
+        if include_raw:
+            return StructuredResult(parsed=parsed_obj, raw=None, parsing_error=None)
+        return parsed_obj
 
 
 class FakePromptRepo:

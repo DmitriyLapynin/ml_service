@@ -1,7 +1,15 @@
 # src/ai_domain/graphs/state.py
 from dataclasses import dataclass
 from dataclasses import field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
+
+from ai_domain.orchestrator.tasks import ResolvedTaskConfig
+
+
+@dataclass
+class MemoryState:
+    summary: str | None = None
+    summary_meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -17,8 +25,9 @@ class GraphState:
     versions: Dict[str, str]
     policies: Dict[str, Any]
     credentials: Dict[str, Any]
+    task_configs: Mapping[str, ResolvedTaskConfig] = field(default_factory=dict)
 
-    runtime: Dict[str, Any]
+    runtime: Dict[str, Any] = field(default_factory=dict)
 
     # request hints (optional, from API layer)
     prompt: str | None = None
@@ -26,9 +35,12 @@ class GraphState:
     is_rag: bool | None = None
     tools: List[Dict[str, Any]] | None = None
     funnel_id: str | None = None
+    request_id: str | None = None
     memory_strategy: str | None = None
     memory_params: Dict[str, Any] = field(default_factory=dict)
     model_params: Dict[str, Any] = field(default_factory=dict)
+    memory: MemoryState = field(default_factory=MemoryState)
+    graph_name: str | None = None
 
     # output
     answer: Dict[str, Any] | None = None

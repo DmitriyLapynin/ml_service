@@ -1,9 +1,15 @@
 from __future__ import annotations
+import json
 import time
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any, Mapping, Optional
 
 class PromptNotFound(Exception):
     pass
+
+
+class _SafeFormatDict(dict):
+    def __missing__(self, key: str) -> str:  # pragma: no cover
+        return "{" + key + "}"
 
 
 class PromptRepository:
@@ -17,6 +23,10 @@ class PromptRepository:
         Compatibility wrapper for different call styles used across nodes:
         - get_prompt(prompt_key, version, channel="chat")
         - get_prompt(prompt_key="...", version="...", channel="chat")
+        Template support:
+        - Plain string: returned as-is.
+        - Format-string template: "Hello {name}" rendered if variables are provided.
+        - JSON: {"template":"...{x}...", "defaults":{...}} rendered with provided variables overriding defaults.
         """
         if args:
             prompt_key = args[0]
@@ -27,6 +37,8 @@ class PromptRepository:
 
         if not prompt_key or not version:
             raise ValueError("prompt_key and version are required")
+
+        variables: Optional[Mapping[str, Any]] = kwargs.get("variables")
 
         cache_key = (prompt_key, version)
         now = time.time()
@@ -53,4 +65,29 @@ class PromptRepository:
 
         content = res.data[0]["content"]
         self._cache[cache_key] = (content, now + self.ttl)
-        return content
+        return self._render(content, variables=variables)
+
+    def _render(self, content: str, *, variables: Optional[Mapping[str, Any]] = None) -> str:
+        if not isinstance(content, str):
+            return str(content)
+
+        text = content.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict) and "template" in data:
+                    template = str(data.get("template", ""))
+                    defaults = data.get("defaults") or {}
+                    merged = dict(defaults) if isinstance(defaults, dict) else {}
+                    if variables:
+                        merged.update(dict(variables))
+                    return template.format_map(_SafeFormatDict(merged))
+            except Exception:
+                pass
+
+        if variables:
+            try:
+                return text.format_map(_SafeFormatDict(dict(variables)))
+            except Exception:
+                return text
+        return text

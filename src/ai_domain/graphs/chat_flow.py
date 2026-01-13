@@ -2,6 +2,7 @@ from langgraph.graph import END, StateGraph
 from ai_domain.graphs.state import GraphState
 
 from ai_domain.nodes.stage_analysis import StageAnalysisNode
+from ai_domain.nodes.summarize_memory import SummarizeMemoryNode
 from ai_domain.nodes.rag_retrieve import RagRetrieveNode
 from ai_domain.nodes.tools_loop import ToolsLoopNode
 from ai_domain.nodes.final_answer import FinalAnswerNode
@@ -11,6 +12,12 @@ from ai_domain.nodes.postprocess import PostprocessNode
 def add_chat_flow(g: StateGraph, deps) -> None:
     # nodes (из nodes/) создаются здесь, но логика внутри nodes/
     g.add_node("chat_stage_analysis", StageAnalysisNode(
+        llm=deps.llm,
+        prompt_repo=deps.prompt_repo,
+        telemetry=deps.telemetry,
+    ))
+
+    g.add_node("chat_memory_summary", SummarizeMemoryNode(
         llm=deps.llm,
         prompt_repo=deps.prompt_repo,
         telemetry=deps.telemetry,
@@ -40,6 +47,7 @@ def add_chat_flow(g: StateGraph, deps) -> None:
     ))
 
     # edges
+    g.add_edge("chat_memory_summary", "chat_stage_analysis")
     g.add_edge("chat_stage_analysis", "chat_rag_retrieve")
 
     # conditional: RAG включён?

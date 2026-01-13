@@ -1,3 +1,6 @@
+from ai_domain.orchestrator.tasks import get_task_config
+
+
 class ToolsLoopNode:
     def __init__(self, llm, prompt_repo, tool_executor, telemetry, *, max_iters=3):
         self.llm = llm
@@ -8,7 +11,8 @@ class ToolsLoopNode:
 
     async def __call__(self, state):
         prompt_key = "tool_prompt"
-        version = state.versions[prompt_key]
+        task_config = get_task_config(state, "tools_loop")
+        version = task_config.prompt_versions.get(prompt_key) or "active"
 
         prompt = self.prompts.get_prompt(prompt_key=prompt_key, version=version)
 
