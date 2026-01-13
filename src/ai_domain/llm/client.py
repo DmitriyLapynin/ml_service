@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 import time
-from typing import Any, Dict, Iterable, List, Literal, Optional, Type
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Type
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -31,6 +31,8 @@ from ai_domain.llm.types import (
     StructuredResult,
 )
 from ai_domain.utils.hashing import messages_fingerprint
+from ai_domain.secrets import get_secret
+from ai_domain.tools.registry import ToolSpec, to_langchain_tool
 
 ProviderName = Literal["openai", "openrouter"]
 
@@ -180,6 +182,94 @@ class LLMClient:
             "prompt_key": metadata.get("prompt_key"),
             "prompt_version": metadata.get("prompt_version"),
         }
+
+    def _resolve_tool_api_key(
+        self,
+        provider: ProviderName,
+        credentials: Optional[LLMCredentials],
+    ) -> str:
+        if provider == "openai" and credentials and credentials.openai_api_key:
+            return credentials.openai_api_key
+        provider_obj = self._providers.get(provider)
+        platform_key = getattr(provider_obj, "platform_api_key", None)
+        if platform_key:
+            return platform_key
+        if provider == "openai":
+            return get_secret("OPENAI_API_KEY", required=True)
+        if provider == "openrouter":
+            return get_secret("OPENROUTER_API_KEY", required=True)
+        raise LLMInvalidRequest(f"Unsupported tool provider: {provider}")
+
+    def _build_chat_openai(
+        self,
+        provider: ProviderName,
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        top_p: Optional[float],
+        timeout_s: Optional[float],
+        credentials: Optional[LLMCredentials],
+    ):
+        try:
+            from langchain_openai import ChatOpenAI  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("langchain-openai is required for tool calling") from exc
+
+        api_key = self._resolve_tool_api_key(provider, credentials)
+        kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if timeout_s is not None:
+            kwargs["timeout"] = timeout_s
+        if provider == "openrouter":
+            kwargs["base_url"] = "https://openrouter.ai/api/v1"
+        return ChatOpenAI(**kwargs)
+
+    def _normalize_tool_specs(self, tools: Sequence[ToolSpec | Dict[str, Any]]) -> List[ToolSpec]:
+        normalized: List[ToolSpec] = []
+        for tool in tools:
+            if isinstance(tool, ToolSpec):
+                normalized.append(tool)
+            else:
+                normalized.append(ToolSpec(**tool))
+        return normalized
+
+    def _to_langchain_messages(self, messages: Sequence[Dict[str, Any]]):
+        try:
+            from langchain_core.messages import (  # type: ignore
+                AIMessage,
+                HumanMessage,
+                SystemMessage,
+                ToolMessage,
+            )
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("langchain-core is required for tool calling") from exc
+
+        lc_messages = []
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content") or ""
+            if role == "system":
+                lc_messages.append(SystemMessage(content=content))
+            elif role == "assistant":
+                tool_calls = m.get("tool_calls")
+                if tool_calls is not None:
+                    lc_messages.append(AIMessage(content=content, tool_calls=tool_calls))
+                else:
+                    lc_messages.append(AIMessage(content=content))
+            elif role == "tool":
+                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id") or "tool"))
+            else:
+                if role != "user":
+                    raise ValueError(f"Unknown role: {role}")
+                lc_messages.append(HumanMessage(content=content))
+        return lc_messages
 
     async def invoke_text(
         self,
@@ -383,6 +473,179 @@ class LLMClient:
         # For BYOK, pass credentials to the provider via our LLMRequest path.
         # (Kept as argument for forward compatibility.)
         _ = credentials
+
+    async def invoke_tool_calls(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        tools: Sequence[ToolSpec | Dict[str, Any]],
+        config: LLMConfig | ResolvedLLMConfig,
+        credentials: Optional[LLMCredentials] = None,
+        context: LLMCallContext | None = None,
+    ):
+        logger = logging.getLogger(__name__)
+        call_id = uuid4().hex[:12]
+        provider = getattr(config, "provider", None) or self._default_provider
+        model = getattr(config, "model", None) or self._default_model
+        metadata = self._attach_required_capabilities(
+            dict(config.metadata or {}),
+            LLMCapabilities(supports_tool_calls=True, supports_structured=False, supports_seed=config.seed is not None),
+        )
+        payload = self._build_payload(
+            call_id=call_id,
+            context=context,
+            provider=provider,
+            model=model,
+            structured=False,
+            schema_name=None,
+            messages=messages,
+            metadata=metadata,
+        )
+        payload["tool_calling"] = True
+        payload["tools_count"] = len(tools)
+        logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+        start = time.perf_counter()
+
+        tool_specs = self._normalize_tool_specs(tools)
+        lc_tools = [to_langchain_tool(tool) for tool in tool_specs]
+        lc_messages = self._to_langchain_messages(messages)
+
+        def _call_with_provider(provider_name: ProviderName):
+            llm = self._build_chat_openai(
+                provider_name,
+                model=model,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+                top_p=config.top_p,
+                timeout_s=config.timeout_s,
+                credentials=credentials,
+            )
+            tool_choice = metadata.get("tool_choice")
+            if tool_choice:
+                llm = llm.bind_tools(lc_tools, tool_choice=tool_choice)
+            else:
+                llm = llm.bind_tools(lc_tools)
+            return llm
+
+        try:
+            llm = _call_with_provider(provider)
+            response = await llm.ainvoke(lc_messages)
+        except Exception as e:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.exception(
+                "llm_call_error",
+                extra={
+                    "event": "llm_call_error",
+                    **payload,
+                    "latency_ms": latency_ms,
+                    "outcome": "error",
+                    "error_kind": self._classify_error(e),
+                },
+            )
+            if self._fallback_provider and self._fallback_provider != provider:
+                fallback_provider = self._fallback_provider
+                payload["provider"] = fallback_provider
+                logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+                start = time.perf_counter()
+                try:
+                    llm = _call_with_provider(fallback_provider)
+                    response = await llm.ainvoke(lc_messages)
+                except Exception as fallback_error:
+                    latency_ms = int((time.perf_counter() - start) * 1000)
+                    logger.exception(
+                        "llm_call_error",
+                        extra={
+                            "event": "llm_call_error",
+                            **payload,
+                            "latency_ms": latency_ms,
+                            "outcome": "error",
+                            "error_kind": self._classify_error(fallback_error),
+                        },
+                    )
+                    raise
+            else:
+                raise
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "llm_call_success",
+            extra={
+                "event": "llm_call_success",
+                **payload,
+                "latency_ms": latency_ms,
+                "outcome": "success",
+            },
+        )
+        return response
+
+    async def invoke_tool_response(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        config: LLMConfig | ResolvedLLMConfig,
+        credentials: Optional[LLMCredentials] = None,
+        context: LLMCallContext | None = None,
+    ) -> str:
+        logger = logging.getLogger(__name__)
+        call_id = uuid4().hex[:12]
+        provider = getattr(config, "provider", None) or self._default_provider
+        model = getattr(config, "model", None) or self._default_model
+        metadata = self._attach_required_capabilities(
+            dict(config.metadata or {}),
+            LLMCapabilities(supports_tool_calls=True, supports_structured=False, supports_seed=config.seed is not None),
+        )
+        payload = self._build_payload(
+            call_id=call_id,
+            context=context,
+            provider=provider,
+            model=model,
+            structured=False,
+            schema_name=None,
+            messages=messages,
+            metadata=metadata,
+        )
+        payload["tool_calling"] = True
+        payload["tools_count"] = 0
+        logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+        start = time.perf_counter()
+
+        lc_messages = self._to_langchain_messages(messages)
+        try:
+            llm = self._build_chat_openai(
+                provider,
+                model=model,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+                top_p=config.top_p,
+                timeout_s=config.timeout_s,
+                credentials=credentials,
+            )
+            response = await llm.ainvoke(lc_messages)
+        except Exception as e:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.exception(
+                "llm_call_error",
+                extra={
+                    "event": "llm_call_error",
+                    **payload,
+                    "latency_ms": latency_ms,
+                    "outcome": "error",
+                    "error_kind": self._classify_error(e),
+                },
+            )
+            raise
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "llm_call_success",
+            extra={
+                "event": "llm_call_success",
+                **payload,
+                "latency_ms": latency_ms,
+                "outcome": "success",
+            },
+        )
+        return getattr(response, "content", "") or ""
 
     async def stream_text(self, *args: Any, **kwargs: Any):  # pragma: no cover
         raise NotImplementedError("stream_text is not implemented yet")

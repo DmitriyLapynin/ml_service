@@ -10,7 +10,9 @@ from ai_domain.agent.safety_prompt import (
 )
 from ai_domain.llm.client import LLMConfig
 from ai_domain.llm.types import LLMCallContext
-from ai_domain.tools.registry import ToolSpec, default_registry
+import json
+
+from ai_domain.tools.registry import ToolSpec, ToolRegistry, default_registry, to_langchain_tool
 
 
 def _ensure_lists(state: dict):
@@ -161,6 +163,24 @@ def create_agent_prompt(tools: List[dict], is_rag: bool = True) -> str:
     return f"{base_instruction}\n\n{tools_section}\n\n{rag_instructions}"
 
 
+def create_agent_prompt_short(is_rag: bool = True) -> str:
+    base_instruction = (
+        "Ты — умный ассистент-исследователь. "
+        "Проанализируй вопрос и при необходимости используй доступные инструменты."
+    )
+    if is_rag:
+        rag_instructions = (
+            "Если вопрос про цены, услуги, адреса или факты — используй knowledge_search. "
+            "Если инструмент не нужен, отвечай без него."
+        )
+    else:
+        rag_instructions = (
+            "Используй инструменты только если это необходимо. "
+            "Не используй инструменты для простых разговоров."
+        )
+    return f"{base_instruction}\n{rag_instructions}"
+
+
 async def safety_in_node(state: dict) -> dict:
     _ensure_lists(state)
     state["executed"].append("safety_in")
@@ -226,48 +246,48 @@ async def agent_node(state: dict) -> dict:
     tools = _normalize_tools(list(tools))
     is_rag = bool(state.get("is_rag", True))
     logging.info(f"Режим RAG: {is_rag}")
-    state["agent_prompt"] = create_agent_prompt(tools, is_rag=is_rag)
+    llm = state.get("llm")
+    use_tool_calls = hasattr(llm, "invoke_tool_calls")
+    state["agent_prompt"] = (
+        create_agent_prompt_short(is_rag=is_rag)
+        if use_tool_calls
+        else create_agent_prompt(tools, is_rag=is_rag)
+    )
     state["filtered_tools"] = _format_tools(tools, is_rag)
     state["wants_retrieve"] = bool(state["filtered_tools"]) and is_rag
 
-    llm = state.get("llm")
-    if not hasattr(llm, "invoke_text"):
-        return state
-
-    model_name = state.get("model") or state.get("model_name") or "gpt-4.1-mini"
-    model_params = state.get("model_params") or {}
-    if model_name in {"gpt-5-nano", "gpt-5-mini"}:
-        model_params = {}
-
-    config = LLMConfig(
-        model=model_name,
-        max_tokens=int(model_params.get("max_tokens") or model_params.get("max_output_tokens") or 128),
-        temperature=float(model_params.get("temperature") or 0.2),
-        top_p=model_params.get("top_p"),
-        metadata={"required_capabilities": {"supports_structured": False}},
-    )
-
-    trace_id = state.get("trace_id")
-    context = (
-        LLMCallContext(
-            trace_id=trace_id,
-            graph=state.get("graph"),
-            node="agent_node",
-            task="agent_decision",
-            channel=state.get("channel"),
-            tenant_id=state.get("tenant_id"),
-            request_id=state.get("request_id"),
+    if use_tool_calls and state["filtered_tools"]:
+        trace_id = state.get("trace_id")
+        call_context = (
+            LLMCallContext(
+                trace_id=trace_id,
+                graph=state.get("graph"),
+                node="agent_node",
+                task="agent_decision",
+                channel=state.get("channel"),
+                tenant_id=state.get("tenant_id"),
+                request_id=state.get("request_id"),
+            )
+            if trace_id
+            else None
         )
-        if trace_id
-        else None
-    )
-
-    llm_messages = [
-        {"role": "system", "content": state["agent_prompt"]},
-        *state.get("messages", []),
-    ]
-    response = await llm.invoke_text(llm_messages, config=config, context=context)
-    state["messages"] = [*state.get("messages", []), {"role": "assistant", "content": response}]
+        response = await llm.invoke_tool_calls(
+            [{"role": "system", "content": state["agent_prompt"]}, *state.get("messages", [])],
+            tools=state["filtered_tools"],
+            config=LLMConfig(model=state.get("model") or "gpt-4.1-mini", max_tokens=128, temperature=0.2),
+            context=call_context,
+        )
+        tool_calls = list(getattr(response, "tool_calls", []) or [])
+        state["tool_calls"] = tool_calls
+        state["wants_retrieve"] = bool(tool_calls)
+        state["messages"] = [
+            *state.get("messages", []),
+            {
+                "role": "assistant",
+                "content": getattr(response, "content", "") or "",
+                "tool_calls": tool_calls,
+            },
+        ]
     return state
 
 
@@ -275,12 +295,40 @@ def tool_router_condition(state: dict) -> str:
     return "retrieve" if state.get("wants_retrieve") else "skip"
 
 
-def tool_executor_node(state: dict) -> dict:
+async def tool_executor_node(state: dict) -> dict:
     _ensure_lists(state)
     state["executed"].append("retrieve")
-    tool_name = "knowledge_search"
-    logging.info(f"Tool call: {tool_name}")
-    state["context"] = "Контекст: найден факт."
+    registry: ToolRegistry = state.get("tool_registry") or default_registry()
+    tool_calls = state.get("tool_calls") or []
+    tool_results = []
+    tool_messages = []
+    if not tool_calls:
+        state["context"] = "Контекст: найден факт."
+        return state
+    for call in tool_calls:
+        name = call.get("name")
+        args = call.get("args") or call.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {}
+        call_id = call.get("id")
+        result = await registry.execute(name, args, trace_id=state.get("trace_id"), call_id=call_id)
+        tool_results.append(result)
+        payload = result.result if result.ok else result.error
+        tool_messages.append(
+            {
+                "role": "tool",
+                "content": json.dumps(payload or {}, ensure_ascii=False),
+                "tool_call_id": result.call_id,
+            }
+        )
+
+    state["tool_results"] = tool_results
+    state["tool_messages"] = tool_messages
+    if tool_results:
+        logging.info(f"Tool results: {len(tool_results)}")
     return state
 
 
@@ -290,6 +338,8 @@ async def generate_node(state: dict) -> dict:
     logging.info("--- УЗЕЛ: УСЛОВНАЯ ГЕНЕРАЦИЯ ОТВЕТА ---")
 
     messages = state.get("messages") or []
+    tool_messages = state.get("tool_messages") or []
+    llm = state.get("llm")
     is_rag = bool(state.get("is_rag", False))
     sub_query_results = state.get("sub_query_results") or []
     user_instruction = state.get("user_instruction")
@@ -328,6 +378,16 @@ async def generate_node(state: dict) -> dict:
         *messages,
         {"role": "system", "content": system_suffix},
     ]
+    if tool_messages and not hasattr(llm, "invoke_tool_response"):
+        tool_outputs = []
+        for msg in tool_messages:
+            content = msg.get("content") or ""
+            tool_outputs.append(f"- {content}")
+        tool_outputs_text = "\n".join(tool_outputs)
+        if tool_outputs_text:
+            llm_messages[-1]["content"] = (
+                f"{system_suffix}\n\nРЕЗУЛЬТАТЫ ИНСТРУМЕНТОВ:\n{tool_outputs_text}"
+            )
 
     model_name = state.get("model") or state.get("model_name") or "gpt-4.1-mini"
     model_params = state.get("model_params") or {}
@@ -341,13 +401,6 @@ async def generate_node(state: dict) -> dict:
         top_p=model_params.get("top_p"),
         metadata={"required_capabilities": {"supports_structured": False}},
     )
-
-    llm = state.get("llm")
-    if not hasattr(llm, "invoke_text"):
-        user_text = (messages[-1].get("content") if messages else "") or ""
-        ctx = f"\n{found_documents}" if found_documents else ""
-        state["answer"] = {"text": f"Ответ: {user_text}{ctx}", "format": "plain"}
-        return state
 
     trace_id = state.get("trace_id")
     context = (
@@ -363,6 +416,25 @@ async def generate_node(state: dict) -> dict:
         if trace_id
         else None
     )
+    if tool_messages and hasattr(llm, "invoke_tool_response"):
+        response = await llm.invoke_tool_response(
+            [
+                {"role": "system", "content": system_prompt},
+                *messages,
+                *tool_messages,
+                {"role": "system", "content": system_suffix},
+            ],
+            config=config,
+            context=context,
+        )
+        state["answer"] = {"text": response, "format": "plain"}
+        return state
+
+    if not hasattr(llm, "invoke_text"):
+        user_text = (messages[-1].get("content") if messages else "") or ""
+        ctx = f"\n{found_documents}" if found_documents else ""
+        state["answer"] = {"text": f"Ответ: {user_text}{ctx}", "format": "plain"}
+        return state
 
     if sub_query_results and is_rag:
         logging.info("Обнаружены результаты RAG. Используется промпт с RAG и инструкцией.")

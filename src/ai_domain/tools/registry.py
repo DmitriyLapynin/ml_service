@@ -158,6 +158,47 @@ def knowledge_search_stub(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "documents": []}
 
 
+def _schema_type_to_python(expected: str) -> type:
+    if expected == "string":
+        return str
+    if expected == "number":
+        return float
+    if expected == "integer":
+        return int
+    if expected == "boolean":
+        return bool
+    if expected == "array":
+        return list
+    if expected == "object":
+        return dict
+    return Any
+
+
+def to_langchain_tool(tool: ToolSpec) -> object:
+    try:
+        from langchain.tools import tool as lc_tool  # type: ignore
+        from pydantic import Field, create_model
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("langchain is required for tool calling") from exc
+
+    properties = tool.schema.get("properties") or {}
+    required = set(tool.schema.get("required") or [])
+    fields: Dict[str, tuple[type, Any]] = {}
+    for key, spec in properties.items():
+        py_type = _schema_type_to_python(spec.get("type", "string"))
+        default = ... if key in required else None
+        fields[key] = (py_type, Field(default=default, description=spec.get("description") or ""))
+
+    args_schema = create_model(f"{tool.name}_args", **fields)
+
+    @lc_tool(tool.name, args_schema=args_schema, description=tool.description)
+    async def _tool_stub(**kwargs):  # type: ignore[no-redef]
+        """Tool stub for tool-calling."""
+        _ = kwargs
+        return ""
+    return _tool_stub
+
+
 def default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(

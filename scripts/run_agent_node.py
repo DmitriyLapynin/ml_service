@@ -35,7 +35,6 @@ async def main():
     args = parser.parse_args()
 
     llm = build_live_llm()
-
     state = {
         "trace_id": "agent-node-local",
         "graph": "rag_agent",
@@ -48,19 +47,30 @@ async def main():
     }
 
     out = await agent_node(state)
-    tool_result = None
-    if out.get("wants_retrieve") and out.get("filtered_tools"):
+    tool_result = []
+    if out.get("tool_calls"):
         registry = default_registry()
-        tool_result = await registry.execute(
-            "knowledge_search",
-            {"query": args.text},
-            trace_id=state.get("trace_id"),
-        )
+        for call in out["tool_calls"]:
+            name = call.get("name")
+            args = call.get("args") or call.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            tool_result.append(
+                await registry.execute(
+                    name,
+                    args,
+                    trace_id=state.get("trace_id"),
+                    call_id=call.get("id"),
+                )
+            )
     result = {
         "messages": out.get("messages", []),
         "wants_retrieve": out.get("wants_retrieve"),
         "filtered_tools": out.get("filtered_tools"),
-        "tool_result": tool_result.__dict__ if tool_result else None,
+        "tool_result": [tr.__dict__ for tr in tool_result] if tool_result else None,
     }
     print(json.dumps(result, ensure_ascii=False))
 

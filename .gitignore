@@ -27,6 +27,7 @@ node_modules/
 __pycache__/
 *.pyc
 venv/
+embeddings_models/
 
 # Java
 target/

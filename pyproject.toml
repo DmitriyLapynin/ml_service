@@ -3,17 +3,10 @@ name = "ai-domain"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Лапынин Дмитрий Олегович",email = "lapynindo@fsk.ru"}
+  { name = "Лапынин Дмитрий Олегович", email = "lapynindo@fsk.ru" }
 ]
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "langgraph (>=1.0.5,<2.0.0)",
-    "openai (>=2.14.0,<3.0.0)",
-    "pydantic (>=2.8.0,<3.0.0)",
-    "python-dotenv (>=1.2.1,<2.0.0)",
-    "supabase (>=2.27.0,<3.0.0)"
-]
+requires-python = ">=3.11,<3.15"
 
 [tool.poetry]
 name = "ai-domain"
@@ -21,10 +14,21 @@ version = "0.1.0"
 packages = [{ include = "ai_domain", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<4.0.0"
+python = ">=3.11,<3.15"
 
+langgraph = ">=1.0.5,<2.0.0"
+openai = ">=2.14.0,<3.0.0"
+pydantic = ">=2.8.0,<3.0.0"
+python-dotenv = ">=1.2.1,<2.0.0"
+supabase = ">=2.27.0,<3.0.0"
+langchain-openai = ">=1.1.7,<2.0.0"
+langchain = ">=1.2.3,<2.0.0"
+sentence-transformers = ">=5.2.0,<6.0.0"
 
-
+faiss-cpu = "^1.13.2"
+langchain-text-splitters = "^1.1.0"
+langchain-community = "^0.4.1"
+pymupdf = "^1.26.7"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
