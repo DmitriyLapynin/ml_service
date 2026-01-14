@@ -12,7 +12,7 @@ class RagRetrieveNode:
 
     # политики и ключи
     rag_policy_key: str = "rag_enabled"
-    rag_config_key: str = "rag_config_id"  # если используешь версионирование конфигов
+    rag_config_key: str = "funnel_id"  # funnel_id используется как selector KB
     default_top_k: int = 5
     max_context_chars: int = 6000  # защита от огромного контекста
 
@@ -42,7 +42,12 @@ class RagRetrieveNode:
             return state
 
         versions: Dict[str, Any] = getattr(state, "versions", {}) or {}
-        rag_config_id = versions.get(self.rag_config_key) or policies.get(self.rag_config_key)
+        rag_config_id = (
+            policies.get(self.rag_config_key)
+            or versions.get(self.rag_config_key)
+            or policies.get("rag_config_id")
+            or versions.get("rag_config_id")
+        )
 
         top_k = int(policies.get("rag_top_k", self.default_top_k))
 

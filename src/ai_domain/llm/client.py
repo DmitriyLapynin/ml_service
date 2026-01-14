@@ -650,6 +650,10 @@ class LLMClient:
     async def stream_text(self, *args: Any, **kwargs: Any):  # pragma: no cover
         raise NotImplementedError("stream_text is not implemented yet")
 
+    async def decide_tool(self, req: Any) -> None:  # pragma: no cover
+        _ = req
+        return None
+
     async def generate(self, *args: Any, **kwargs: Any) -> LLMResponse:
         """
         Compatibility adapter for existing code:

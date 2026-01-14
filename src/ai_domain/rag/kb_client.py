@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple, Protocol
 
@@ -337,3 +338,65 @@ class FaissKBClient:
                 }
             )
         return results
+
+    def save(
+        self,
+        *,
+        index_path: str | Path,
+        chunks_path: str | Path,
+        meta_path: str | Path | None = None,
+        extra_meta: Dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            import faiss  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("faiss is required for FAISS save") from exc
+
+        index_path = Path(index_path)
+        chunks_path = Path(chunks_path)
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        chunks_path.parent.mkdir(parents=True, exist_ok=True)
+
+        faiss.write_index(self._index, str(index_path))
+        chunks_payload = [
+            {"id": c.id, "text": c.text, "metadata": c.metadata} for c in self._chunks
+        ]
+        chunks_path.write_text(
+            json.dumps(chunks_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        if meta_path:
+            meta_path = Path(meta_path)
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "chunks": len(self._chunks),
+            }
+            if extra_meta:
+                meta.update(extra_meta)
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @classmethod
+    def load(
+        cls,
+        *,
+        index_path: str | Path,
+        chunks_path: str | Path,
+        embedder: LocalEmbedder,
+    ) -> "FaissKBClient":
+        try:
+            import faiss  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("faiss is required for FAISS load") from exc
+
+        index = faiss.read_index(str(index_path))
+        payload = json.loads(Path(chunks_path).read_text(encoding="utf-8"))
+        chunks = [
+            KBChunk(
+                id=item["id"],
+                text=item["text"],
+                metadata=item.get("metadata") or {},
+            )
+            for item in payload
+        ]
+        return cls(index=index, chunks=chunks, embedder=embedder)

@@ -5,7 +5,7 @@ from ai_domain.tools.registry import ToolRegistry, ToolSpec
 
 @pytest.mark.asyncio
 async def test_tool_registry_execute_async_handler():
-    async def handler(args):
+    async def handler(args, state):  # noqa: ARG001
         return {"echo": args["query"]}
 
     registry = ToolRegistry()
@@ -18,14 +18,14 @@ async def test_tool_registry_execute_async_handler():
         )
     )
 
-    res = await registry.execute("knowledge_search", {"query": "hi"})
+    res = await registry.execute("knowledge_search", {"query": "hi"}, state={})
     assert res.ok is True
     assert res.result["echo"] == "hi"
 
 
 @pytest.mark.asyncio
 async def test_tool_registry_execute_sync_handler():
-    def handler(args):
+    def handler(args, state):  # noqa: ARG001
         return {"ok": True, "value": args["x"]}
 
     registry = ToolRegistry()
@@ -38,14 +38,14 @@ async def test_tool_registry_execute_sync_handler():
         )
     )
 
-    res = await registry.execute("sync_tool", {"x": 3})
+    res = await registry.execute("sync_tool", {"x": 3}, state={})
     assert res.ok is True
     assert res.result["value"] == 3
 
 
 @pytest.mark.asyncio
 async def test_tool_registry_invalid_args():
-    async def handler(args):
+    async def handler(args, state):  # noqa: ARG001
         return {"ok": True}
 
     registry = ToolRegistry()
@@ -58,7 +58,7 @@ async def test_tool_registry_invalid_args():
         )
     )
 
-    res = await registry.execute("tool", {"q": 1})
+    res = await registry.execute("tool", {"q": 1}, state={})
     assert res.ok is False
     assert res.error["code"] == "invalid_args"
 
@@ -75,7 +75,7 @@ async def test_tool_registry_missing_handler():
         )
     )
 
-    res = await registry.execute("tool", {"x": 1})
+    res = await registry.execute("tool", {"x": 1}, state={})
     assert res.ok is False
     assert res.error["code"] == "tool_not_implemented"
 

@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 
 
-ToolHandler = Callable[[Dict[str, Any]], Dict[str, Any] | Awaitable[Dict[str, Any]]]
+ToolHandler = Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any] | Awaitable[Dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -49,10 +49,12 @@ class ToolRegistry:
         name: str,
         args: Dict[str, Any],
         *,
+        state: Dict[str, Any] | None = None,
         trace_id: str | None = None,
         call_id: str | None = None,
     ) -> ToolResult:
         call_id = call_id or uuid4().hex[:12]
+        state = state or {}
         tool = self.get(name)
         if not tool:
             return ToolResult(
@@ -87,7 +89,7 @@ class ToolRegistry:
         logging.info(f"tool_call_start name={name} call_id={call_id} trace_id={trace_id}")
         start = time.perf_counter()
         try:
-            result = tool.handler(args)
+            result = tool.handler(args, state)
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
@@ -153,9 +155,26 @@ def _matches_type(value: Any, expected: str) -> bool:
     return True
 
 
-def knowledge_search_stub(args: Dict[str, Any]) -> Dict[str, Any]:
-    logging.info(f"knowledge_search called with args={list(args.keys())}")
-    return {"status": "ok", "documents": []}
+async def knowledge_search_handler(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    query = (args.get("query") or "").strip()
+    top_k = int(args.get("top_k") or 5)
+    top_k_per_doc = int(args.get("top_k_per_doc") or top_k)
+    funnel_id = state.get("funnel_id")
+    resolver = state.get("kb_resolver")
+    if resolver and funnel_id:
+        results = await resolver.search(
+            funnel_id=funnel_id,
+            query=query,
+            top_k=top_k,
+            top_k_per_doc=top_k_per_doc,
+        )
+        return {"status": "ok", "documents": results}
+
+    kb = state.get("kb_client")
+    if kb is None:
+        return {"status": "error", "code": "kb_missing", "message": "kb_client is not configured"}
+    results = await kb.search(query=query, top_k=top_k)
+    return {"status": "ok", "documents": results}
 
 
 def _schema_type_to_python(expected: str) -> type:
@@ -207,10 +226,14 @@ def default_registry() -> ToolRegistry:
             description="Поиск фактов и документов в базе знаний (заглушка).",
             schema={
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {
+                    "query": {"type": "string"},
+                    "top_k": {"type": "integer"},
+                    "top_k_per_doc": {"type": "integer"},
+                },
                 "required": ["query"],
             },
-            handler=knowledge_search_stub,
+            handler=knowledge_search_handler,
         )
     )
     return registry

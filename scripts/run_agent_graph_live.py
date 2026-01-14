@@ -10,6 +10,8 @@ from ai_domain.llm.client import LLMClient
 from ai_domain.llm.openai_provider import OpenAIProvider
 from ai_domain.llm.rate_limit import ConcurrencyLimiter
 from ai_domain.secrets import get_secret
+from ai_domain.rag.embedder import LocalEmbedder
+from ai_domain.rag.funnel_store import FunnelKBResolver
 from ai_domain.tools.registry import default_registry
 
 
@@ -24,7 +26,7 @@ def build_live_llm() -> LLMClient:
     )
 
 
-def make_state(text: str, *, llm, model: str) -> dict:
+def make_state(text: str, *, llm, model: str, kb_resolver, funnel_id: str, tool_choice: str) -> dict:
     return {
         "trace_id": "agent-graph-live",
         "graph": "rag_agent",
@@ -34,12 +36,24 @@ def make_state(text: str, *, llm, model: str) -> dict:
         "is_rag": True,
         "model": model,
         "llm": llm,
+        "kb_resolver": kb_resolver,
+        "funnel_id": funnel_id,
+        "tool_choice": tool_choice or None,
     }
 
 
-async def run_case(label: str, text: str, *, model: str, llm: LLMClient):
+async def run_case(label: str, text: str, *, model: str, llm: LLMClient, kb_resolver, funnel_id: str, tool_choice: str):
     graph = build_agent_graph(AgentNodes())
-    out = await graph.ainvoke(make_state(text, llm=llm, model=model))
+    out = await graph.ainvoke(
+        make_state(
+            text,
+            llm=llm,
+            model=model,
+            kb_resolver=kb_resolver,
+            funnel_id=funnel_id,
+            tool_choice=tool_choice,
+        )
+    )
     result = {
         "label": label,
         "executed": out.get("executed"),
@@ -56,11 +70,23 @@ async def main():
     parser = argparse.ArgumentParser(description="Run agent graph end-to-end with real LLM.")
     parser.add_argument("--model", type=str, default="gpt-4.1-mini")
     parser.add_argument("--text", type=str, default="Привет! Что дальше?")
+    parser.add_argument("--tool-choice", type=str, default="")
     args = parser.parse_args()
 
     llm = build_live_llm()
+    embedder = LocalEmbedder(model_path="embeddings_models/rubert-mini-frida")
+    resolver = FunnelKBResolver(base_dir="data/funnels", embedder=embedder)
+    funnel_id = "10"
 
-    await run_case("no_tool_call", "Сколько стоят брекеты и какой ваш адрес?", model=args.model, llm=llm)
+    await run_case(
+        "with_tool_call",
+        args.text,
+        model=args.model,
+        llm=llm,
+        kb_resolver=resolver,
+        funnel_id=funnel_id,
+        tool_choice=args.tool_choice,
+    )
     # await run_case("with_tool_call", "Сколько стоят брекеты и какой ваш адрес?", model=args.model, llm=llm)
 
 

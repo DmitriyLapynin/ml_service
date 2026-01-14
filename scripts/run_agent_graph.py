@@ -33,6 +33,12 @@ class FakeLLMClient:
         )
 
 
+class FakeKBClient:
+    async def search(self, *, query: str, top_k: int = 5, rag_config_id: str | None = None):  # noqa: ARG002
+        _ = (query, top_k, rag_config_id)
+        return [{"id": "doc-1", "score": 1.0, "content": "stub"}]
+
+
 def make_state(text: str, *, should_call: bool) -> dict:
     return {
         "trace_id": "agent-graph-local",
@@ -42,6 +48,7 @@ def make_state(text: str, *, should_call: bool) -> dict:
         "tool_registry": default_registry(),
         "is_rag": True,
         "llm": FakeLLMClient(should_call=should_call),
+        "kb_client": FakeKBClient(),
     }
 
 

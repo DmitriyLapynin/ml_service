@@ -56,6 +56,10 @@ class ChatRequest(BaseModel):
         description="Список описаний инструментов для их создания.",
         examples=[[]],
     )
+    crypted_api_key: Optional[str] = Field(
+        default=None,
+        description="Зашифрованный API ключ (опционально).",
+    )
     funnel_id: Optional[str] = Field(
         default="1",
         description="Id воронки, если используется RAG.",
@@ -78,6 +82,23 @@ class ChatRequest(BaseModel):
     )
 
 
+class ChatResponse(BaseModel):
+    status: Literal["ok", "degraded", "error"]
+    answer: Dict[str, Any] | None = None
+    stage: Dict[str, Any] | None = None
+    trace_id: str
+    versions: Dict[str, Any] | None = None
+
+
+class ErrorResponse(BaseModel):
+    error: str
+    trace_id: Optional[str] = None
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+
+
 def chat_request_to_orchestrator_request(
     *,
     chat: ChatRequest,
@@ -86,6 +107,8 @@ def chat_request_to_orchestrator_request(
     channel: str = "chat",
     idempotency_key: str | None = None,
     credentials: dict | None = None,
+    funnel_id: str | None = None,
+    trace_id: str | None = None,
 ) -> Dict[str, Any]:
     """
     Адаптер: внешний ChatRequest -> внутренний request для Orchestrator.run().
@@ -102,9 +125,10 @@ def chat_request_to_orchestrator_request(
         "role_instruction": chat.role_instruction,
         "is_rag": chat.is_rag,
         "tools": [t.model_dump() for t in chat.tools] if chat.tools else None,
-        "funnel_id": chat.funnel_id,
+        "funnel_id": funnel_id or chat.funnel_id,
         "memory_strategy": chat.memory_strategy,
         "memory_params": chat.memory_params,
         "model": chat.model.name,
         "model_params": chat.model.params,
+        "trace_id": trace_id,
     }

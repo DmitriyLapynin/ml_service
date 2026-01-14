@@ -16,13 +16,29 @@ class ToolsLoopNode:
 
         prompt = self.prompts.get_prompt(prompt_key=prompt_key, version=version)
 
+        def _get(attr, default=None):
+            if hasattr(state, attr):
+                return getattr(state, attr)
+            if isinstance(state, dict):
+                return state.get(attr, default)
+            return default
+
+        def _set(attr, value):
+            if hasattr(state, attr):
+                setattr(state, attr, value)
+            elif isinstance(state, dict):
+                state[attr] = value
+
+        runtime = _get("runtime", {}) or {}
+        messages = _get("messages", []) or []
+
         for _ in range(self.max_iters):
             req = {
                 "messages": [
                     {"role": "system", "content": prompt},
-                    *state.messages,
+                    *messages,
                 ],
-                "analysis": state.runtime.get("analysis"),
+                "analysis": runtime.get("analysis"),
             }
 
             decision = await self.llm.decide_tool(req)
@@ -36,11 +52,12 @@ class ToolsLoopNode:
                 state=state,
             )
 
-            state.runtime.setdefault("tool_results", []).append(
+            runtime.setdefault("tool_results", []).append(
                 {
                     "tool": decision.name,
                     "result": result,
                 }
             )
 
+        _set("runtime", runtime)
         return state

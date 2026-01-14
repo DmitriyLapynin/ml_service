@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ai_domain.rag.embedder import LocalEmbedder
 from ai_domain.rag.kb_client import FaissKBClient, KBChunk
+from ai_domain.rag.funnel_store import FunnelKBStore
 
 
 def _save_chunks(chunks, path: Path) -> None:
@@ -76,13 +77,23 @@ async def main() -> None:
     parser.add_argument("--query", type=str, default="")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--funnel-id", type=str, default="")
     args = parser.parse_args()
 
     source_path = Path(args.source)
     index_path = Path(args.index_path)
     chunks_path = Path(args.chunks_path)
+    embedder = LocalEmbedder(model_path=args.model_path)
 
-    if args.rebuild or not index_path.exists() or not chunks_path.exists():
+    if args.funnel_id:
+        store = FunnelKBStore(base_dir="data/funnels", embedder=embedder)
+        store.add_document(
+            funnel_id=args.funnel_id,
+            source_path=source_path,
+            chunk_size=args.chunk_size,
+            overlap=args.overlap,
+        )
+    elif args.rebuild or not index_path.exists() or not chunks_path.exists():
         build_index(
             source_path=source_path,
             index_path=index_path,

@@ -7,7 +7,7 @@ from ai_domain.tools.registry import ToolRegistry, ToolSpec
 
 @pytest.mark.asyncio
 async def test_tool_executor_node_executes_calls():
-    async def handler(args):
+    async def handler(args, state):  # noqa: ARG001
         return {"echo": args["query"]}
 
     registry = ToolRegistry()
@@ -45,7 +45,7 @@ async def test_native_loop_messages_include_tool_calls_and_results():
             self.last_messages = messages
             return "ok-final"
 
-    async def handler(args):
+    async def handler(args, state):  # noqa: ARG001
         return {"echo": args["query"]}
 
     registry = ToolRegistry()

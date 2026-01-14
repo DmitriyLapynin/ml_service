@@ -271,10 +271,19 @@ async def agent_node(state: dict) -> dict:
             if trace_id
             else None
         )
+        metadata = {}
+        tool_choice = state.get("tool_choice")
+        if tool_choice:
+            metadata["tool_choice"] = tool_choice
         response = await llm.invoke_tool_calls(
             [{"role": "system", "content": state["agent_prompt"]}, *state.get("messages", [])],
             tools=state["filtered_tools"],
-            config=LLMConfig(model=state.get("model") or "gpt-4.1-mini", max_tokens=128, temperature=0.2),
+            config=LLMConfig(
+                model=state.get("model") or "gpt-4.1-mini",
+                max_tokens=128,
+                temperature=0.2,
+                metadata=metadata,
+            ),
             context=call_context,
         )
         tool_calls = list(getattr(response, "tool_calls", []) or [])
@@ -314,7 +323,13 @@ async def tool_executor_node(state: dict) -> dict:
             except Exception:
                 args = {}
         call_id = call.get("id")
-        result = await registry.execute(name, args, trace_id=state.get("trace_id"), call_id=call_id)
+        result = await registry.execute(
+            name,
+            args,
+            state=state,
+            trace_id=state.get("trace_id"),
+            call_id=call_id,
+        )
         tool_results.append(result)
         payload = result.result if result.ok else result.error
         tool_messages.append(

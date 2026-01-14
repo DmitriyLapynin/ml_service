@@ -9,6 +9,8 @@ from ai_domain.llm.client import LLMClient
 from ai_domain.llm.openai_provider import OpenAIProvider
 from ai_domain.llm.rate_limit import ConcurrencyLimiter
 from ai_domain.secrets import get_secret
+from ai_domain.rag.embedder import LocalEmbedder
+from ai_domain.rag.funnel_store import FunnelKBResolver
 from ai_domain.tools.registry import default_registry
 
 
@@ -35,6 +37,8 @@ async def main():
     args = parser.parse_args()
 
     llm = build_live_llm()
+    embedder = LocalEmbedder(model_path="embeddings_models/rubert-mini-frida")
+    resolver = FunnelKBResolver(base_dir="data/funnels", embedder=embedder)
     state = {
         "trace_id": "agent-node-local",
         "graph": "rag_agent",
@@ -44,6 +48,8 @@ async def main():
         "model": args.model,
         "model_params": {"temperature": 0.2, "max_tokens": 128},
         "llm": llm,
+        "kb_resolver": resolver,
+        "funnel_id": "default",
     }
 
     out = await agent_node(state)
@@ -62,6 +68,7 @@ async def main():
                 await registry.execute(
                     name,
                     args,
+                    state=state,
                     trace_id=state.get("trace_id"),
                     call_id=call.get("id"),
                 )

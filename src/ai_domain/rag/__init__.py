@@ -4,6 +4,7 @@ from ai_domain.rag.file_loader import load_text_from_file
 from ai_domain.rag.kb_client import FaissKBClient, KBChunk
 from ai_domain.rag.search import FaissSearchService
 from ai_domain.rag.loaders import load_documents, DocumentLike
+from ai_domain.rag.funnel_store import FunnelKBResolver, FunnelKBStore
 
 __all__ = [
     "ContextCompiler",
@@ -14,4 +15,6 @@ __all__ = [
     "FaissSearchService",
     "load_documents",
     "DocumentLike",
+    "FunnelKBResolver",
+    "FunnelKBStore",
 ]
