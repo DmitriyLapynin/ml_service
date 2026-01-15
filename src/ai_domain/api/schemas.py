@@ -88,6 +88,7 @@ class ChatResponse(BaseModel):
     stage: Dict[str, Any] | None = None
     trace_id: str
     versions: Dict[str, Any] | None = None
+    meta: Dict[str, Any] | None = None
 
 
 class ErrorResponse(BaseModel):

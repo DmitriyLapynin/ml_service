@@ -1,5 +1,6 @@
 # src/ai_domain/orchestrator/service.py
 from typing import Any, Dict
+import time
 from uuid import uuid4
 
 from ai_domain.orchestrator.context_builder import build_graph_state
@@ -30,14 +31,20 @@ class Orchestrator:
         version_resolver,
         policy_resolver,
         telemetry,
+        state_builder=None,
+        graph_name: str | None = None,
     ):
         self.graph = graph
         self.idempotency = idempotency
         self.version_resolver = version_resolver
         self.policy_resolver = policy_resolver
         self.telemetry = telemetry
+        self.state_builder = state_builder
+        self.graph_name = graph_name or "main_graph"
 
     async def run(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        start_ts = int(time.time() * 1000)
+        start = time.perf_counter()
         trace_id = request.get("trace_id") or str(uuid4())
         idempotency_key = request.get("idempotency_key")
         marked_in_progress = False
@@ -120,30 +127,44 @@ class Orchestrator:
                 )
 
             # 4️⃣ Build graph state
-            state = build_graph_state(
-                tenant_id=request["tenant_id"],
-                conversation_id=request["conversation_id"],
-                channel=request["channel"],
-                messages=request["messages"],
-                versions=versions,
-                policies=policies_with_model,
-                credentials=credentials,
-                task_configs=task_configs,
-                prompt=request.get("prompt"),
-                role_instruction=request.get("role_instruction"),
-                is_rag=request.get("is_rag"),
-                tools=request.get("tools"),
-                funnel_id=funnel_id,
-                request_id=idempotency_key,
-                memory_strategy=request.get("memory_strategy"),
-                memory_params=request.get("memory_params"),
-                model_params=model_params,
-                trace_id=trace_id,
-                graph_name="main_graph",
-            )
+            if self.state_builder is not None:
+                state = self.state_builder(
+                    request=request,
+                    versions=versions,
+                    policies=policies_with_model,
+                    credentials=credentials,
+                    task_configs=task_configs,
+                    trace_id=trace_id,
+                    idempotency_key=idempotency_key,
+                    graph_name=self.graph_name,
+                )
+            else:
+                state = build_graph_state(
+                    tenant_id=request["tenant_id"],
+                    conversation_id=request["conversation_id"],
+                    channel=request["channel"],
+                    messages=request["messages"],
+                    versions=versions,
+                    policies=policies_with_model,
+                    credentials=credentials,
+                    task_configs=task_configs,
+                    prompt=request.get("prompt"),
+                    role_instruction=request.get("role_instruction"),
+                    is_rag=request.get("is_rag"),
+                    tools=request.get("tools"),
+                    funnel_id=funnel_id,
+                    request_id=idempotency_key,
+                    memory_strategy=request.get("memory_strategy"),
+                    memory_params=request.get("memory_params"),
+                    model_params=model_params,
+                    trace_id=trace_id,
+                    graph_name=self.graph_name,
+                )
 
             # 5️⃣ Run graph
             result_state = await self.graph.ainvoke(state)
+            end_ts = int(time.time() * 1000)
+            total_latency_ms = int((time.perf_counter() - start) * 1000)
 
             def _get(attr, default=None):
                 if hasattr(result_state, attr):
@@ -163,6 +184,42 @@ class Orchestrator:
                 "trace_id": trace_id,
                 "versions": _get("versions"),
             }
+            meta = _get("meta") or {}
+            meta.setdefault("graph", _get("graph") or _get("graph_name") or self.graph_name)
+            meta.setdefault("graph_name", _get("graph_name") or self.graph_name)
+            meta.setdefault("graph_version", _get("graph_version"))
+            meta.setdefault("route", _get("route") or request.get("channel"))
+            meta.setdefault("start_ts", start_ts)
+            meta.setdefault("end_ts", end_ts)
+            meta.setdefault("total_latency_ms", total_latency_ms)
+            meta.setdefault("degraded", degraded)
+            meta.setdefault("errors", runtime.get("errors") or [])
+            meta.setdefault("steps", runtime.get("steps") or [])
+            llm_metrics = _get("llm_metrics")
+            if llm_metrics:
+                meta.setdefault("llm_calls", llm_metrics)
+            tool_call_meta = _get("tool_call_meta")
+            if tool_call_meta:
+                meta.setdefault("tool_calls", tool_call_meta)
+            rag_meta = _get("rag_meta")
+            if rag_meta is None:
+                rag_meta = {
+                    "enabled": bool(request.get("is_rag", False)),
+                    "config_id": request.get("funnel_id"),
+                    "top_k": None,
+                    "query": None,
+                    "retrieval_latency_ms": 0,
+                    "documents": [],
+                    "deduped_count": 0,
+                    "final_context_chars": 0,
+                    "context_truncated": False,
+                    "truncate_reason": None,
+                    "rerank_used": False,
+                }
+            meta.setdefault("rag", rag_meta)
+            response["meta"] = meta
+            if meta is not None:
+                response["meta"] = meta
 
             if idempotency_key:
                 await self.idempotency.save(idempotency_key, response)

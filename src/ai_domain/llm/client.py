@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 import time
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Type
@@ -30,6 +30,7 @@ from ai_domain.llm.types import (
     LLMCapabilities,
     StructuredResult,
 )
+from ai_domain.llm.model_caps import get_model_capabilities
 from ai_domain.utils.hashing import messages_fingerprint
 from ai_domain.secrets import get_secret
 from ai_domain.tools.registry import ToolSpec, to_langchain_tool
@@ -41,7 +42,7 @@ ProviderName = Literal["openai", "openrouter"]
 class LLMConfig:
     provider: ProviderName = "openai"
     model: Optional[str] = None
-    temperature: float = 0.2
+    temperature: Optional[float] = 0.2
     top_p: Optional[float] = None
     max_tokens: int = 2048
     timeout_s: Optional[float] = None  # best-effort (provider-dependent)
@@ -55,7 +56,7 @@ class LLMConfig:
 class ResolvedLLMConfig:
     provider: ProviderName
     model: str
-    temperature: float = 0.2
+    temperature: Optional[float] = 0.2
     top_p: Optional[float] = None
     max_tokens: int = 2048
     timeout_s: Optional[float] = None
@@ -121,6 +122,42 @@ class LLMClient:
             telemetry=self._telemetry,
         )
 
+    def _sanitize_config(
+        self,
+        config: LLMConfig | ResolvedLLMConfig,
+        *,
+        provider: str,
+        model: str,
+        context: LLMCallContext | None,
+    ) -> tuple[LLMConfig | ResolvedLLMConfig, list[str]]:
+        caps = get_model_capabilities(model)
+        removed: list[str] = []
+        updated = config
+        if not caps.supports_top_p and getattr(config, "top_p", None) is not None:
+            removed.append("top_p")
+            updated = replace(updated, top_p=None)
+        if not caps.supports_seed and getattr(config, "seed", None) is not None:
+            removed.append("seed")
+            updated = replace(updated, seed=None)
+        if not caps.supports_temperature and getattr(config, "temperature", None) is not None:
+            removed.append("temperature")
+            updated = replace(updated, temperature=None)
+        if removed:
+            logger = logging.getLogger(__name__)
+            logger.info(
+                "llm_config_sanitized",
+                extra={
+                    "event": "llm_config_sanitized",
+                    "provider": provider,
+                    "model": model,
+                    "removed": removed,
+                    "trace_id": context.trace_id if context else None,
+                    "node": context.node if context else None,
+                    "task": context.task if context else None,
+                },
+            )
+        return updated, removed
+
     def _attach_required_capabilities(self, metadata: Dict[str, Any], required: LLMCapabilities) -> Dict[str, Any]:
         out = dict(metadata or {})
         existing = out.get("required_capabilities") or {}
@@ -183,6 +220,73 @@ class LLMClient:
             "prompt_version": metadata.get("prompt_version"),
         }
 
+    def _estimate_tokens(self, text: str, *, model: str | None) -> int:
+        if not text:
+            return 0
+        try:
+            import tiktoken  # type: ignore
+
+            try:
+                enc = tiktoken.encoding_for_model(model or "")
+            except Exception:
+                enc = tiktoken.get_encoding("cl100k_base")
+            return len(enc.encode(text))
+        except Exception:
+            return max(1, len(text) // 4)
+
+    def _estimate_tokens_for_messages(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        model: str | None,
+    ) -> int:
+        joined = "\n".join(f"{m.get('role','')}:{m.get('content','')}" for m in messages)
+        return self._estimate_tokens(joined, model=model)
+
+    def _record_metrics(
+        self,
+        *,
+        context: LLMCallContext | None,
+        payload: Dict[str, Any],
+        latency_ms: int,
+        usage: Dict[str, Any],
+        **extra: Any,
+    ) -> None:
+        if not context or context.metrics is None:
+            return
+        entry = {
+            "call_id": payload.get("call_id"),
+            "provider": payload.get("provider"),
+            "model": payload.get("model"),
+            "structured": payload.get("structured"),
+            "node": payload.get("node"),
+            "task": payload.get("task"),
+            "latency_ms": latency_ms,
+            "usage": usage,
+        }
+        entry.update(extra)
+        context.metrics.append(entry)
+
+    def _extract_usage_from_langchain_response(self, response: Any) -> Dict[str, Any] | None:
+        meta = getattr(response, "response_metadata", None) or {}
+        usage = meta.get("token_usage") or meta.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        prompt = usage.get("prompt_tokens") or usage.get("input_tokens")
+        completion = usage.get("completion_tokens") or usage.get("output_tokens")
+        total = usage.get("total_tokens")
+        return {
+            "prompt_tokens": int(prompt) if prompt is not None else None,
+            "completion_tokens": int(completion) if completion is not None else None,
+            "total_tokens": int(total) if total is not None else None,
+            "estimated": False,
+            "completion_unknown": completion is None,
+        }
+
+    def _extract_finish_reason_from_langchain_response(self, response: Any) -> str | None:
+        meta = getattr(response, "response_metadata", None) or {}
+        return meta.get("finish_reason")
+
     def _resolve_tool_api_key(
         self,
         provider: ProviderName,
@@ -220,9 +324,10 @@ class LLMClient:
         kwargs: Dict[str, Any] = {
             "api_key": api_key,
             "model": model,
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if top_p is not None:
             kwargs["top_p"] = top_p
         if timeout_s is not None:
@@ -283,6 +388,12 @@ class LLMClient:
         call_id = uuid4().hex[:12]
         provider = getattr(config, "provider", None) or self._default_provider
         model = getattr(config, "model", None) or self._default_model
+        config, _ = self._sanitize_config(
+            config,
+            provider=provider,
+            model=model,
+            context=context,
+        )
         metadata = dict(config.metadata or {})
         if config.seed is not None:
             metadata = self._attach_required_capabilities(
@@ -314,6 +425,7 @@ class LLMClient:
         router = self._build_router(config=config)
         try:
             resp = await router.generate(req)
+            print(resp)
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
             logger.exception(
@@ -328,6 +440,36 @@ class LLMClient:
             )
             raise
         latency_ms = int((time.perf_counter() - start) * 1000)
+        usage = {
+            "prompt_tokens": resp.usage.prompt_tokens if resp.usage else None,
+            "completion_tokens": resp.usage.completion_tokens if resp.usage else None,
+            "total_tokens": resp.usage.total_tokens if resp.usage else None,
+            "estimated": bool(resp.usage.estimated) if resp.usage else False,
+            "completion_unknown": False,
+        }
+        if not resp.usage or resp.usage.total_tokens == 0:
+            prompt_tokens = self._estimate_tokens_for_messages(messages, model=model)
+            completion_tokens = self._estimate_tokens(resp.content or "", model=model)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "estimated": True,
+                "completion_unknown": False,
+            }
+        self._record_metrics(
+            context=context,
+            payload=payload,
+            latency_ms=latency_ms,
+            usage=usage,
+            finish_reason=resp.finish_reason,
+            response_format="text",
+            retry_count=(resp.raw or {}).get("retry_count") if isinstance(resp.raw, dict) else None,
+            fallback_used=(resp.raw or {}).get("fallback_used") if isinstance(resp.raw, dict) else None,
+            usage_source="estimated" if usage.get("estimated") else "provider",
+            request_tokens_estimated=bool(usage.get("estimated")),
+            usage_from_provider=not bool(usage.get("estimated")),
+        )
         logger.info(
             "llm_call_success",
             extra={
@@ -355,6 +497,12 @@ class LLMClient:
         call_id = uuid4().hex[:12]
         provider = getattr(config, "provider", None) or self._default_provider
         model = getattr(config, "model", None) or self._default_model
+        config, _ = self._sanitize_config(
+            config,
+            provider=provider,
+            model=model,
+            context=context,
+        )
         metadata = self._attach_required_capabilities(
             dict(config.metadata or {}),
             LLMCapabilities(supports_structured=True, supports_tool_calls=False, supports_seed=config.seed is not None),
@@ -378,7 +526,7 @@ class LLMClient:
             model=model,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
-            top_p=config.top_p if config.top_p is not None else 1.0,
+            top_p=config.top_p,
             metadata=metadata,
         )
 
@@ -433,6 +581,34 @@ class LLMClient:
             raise
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+        if include_raw:
+            output_text = ""
+            if isinstance(result, dict) and "raw" in result:
+                output_text = str(result.get("raw") or "")
+        else:
+            output_text = str(result) if result is not None else ""
+        prompt_tokens = self._estimate_tokens_for_messages(messages, model=model)
+        completion_tokens = self._estimate_tokens(output_text, model=model)
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "estimated": True,
+            "completion_unknown": False,
+        }
+        self._record_metrics(
+            context=context,
+            payload=payload,
+            latency_ms=latency_ms,
+            usage=usage,
+            finish_reason=None,
+            response_format="structured",
+            retry_count=None,
+            fallback_used=False,
+            usage_source="estimated",
+            request_tokens_estimated=True,
+            usage_from_provider=False,
+        )
         logger.info(
             "llm_call_success",
             extra={
@@ -487,6 +663,12 @@ class LLMClient:
         call_id = uuid4().hex[:12]
         provider = getattr(config, "provider", None) or self._default_provider
         model = getattr(config, "model", None) or self._default_model
+        config, _ = self._sanitize_config(
+            config,
+            provider=provider,
+            model=model,
+            context=context,
+        )
         metadata = self._attach_required_capabilities(
             dict(config.metadata or {}),
             LLMCapabilities(supports_tool_calls=True, supports_structured=False, supports_seed=config.seed is not None),
@@ -505,6 +687,7 @@ class LLMClient:
         payload["tools_count"] = len(tools)
         logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
         start = time.perf_counter()
+        fallback_used = False
 
         tool_specs = self._normalize_tool_specs(tools)
         lc_tools = [to_langchain_tool(tool) for tool in tool_specs]
@@ -528,9 +711,14 @@ class LLMClient:
             return llm
 
         try:
+            if not self._breaker.allow():
+                raise LLMUnavailable("Circuit breaker open")
             llm = _call_with_provider(provider)
-            response = await llm.ainvoke(lc_messages)
+            async with self._limiter:
+                response = await llm.ainvoke(lc_messages)
+            self._breaker.record_success()
         except Exception as e:
+            self._breaker.record_failure(e)
             latency_ms = int((time.perf_counter() - start) * 1000)
             logger.exception(
                 "llm_call_error",
@@ -548,9 +736,15 @@ class LLMClient:
                 logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
                 start = time.perf_counter()
                 try:
+                    if not self._breaker.allow():
+                        raise LLMUnavailable("Circuit breaker open")
                     llm = _call_with_provider(fallback_provider)
-                    response = await llm.ainvoke(lc_messages)
+                    async with self._limiter:
+                        response = await llm.ainvoke(lc_messages)
+                    self._breaker.record_success()
+                    fallback_used = True
                 except Exception as fallback_error:
+                    self._breaker.record_failure(fallback_error)
                     latency_ms = int((time.perf_counter() - start) * 1000)
                     logger.exception(
                         "llm_call_error",
@@ -567,6 +761,34 @@ class LLMClient:
                 raise
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+        usage = self._extract_usage_from_langchain_response(response)
+        if usage is None:
+            prompt_tokens = self._estimate_tokens_for_messages(messages, model=model)
+            output_text = getattr(response, "content", "") or ""
+            completion_tokens = self._estimate_tokens(output_text, model=model)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "estimated": True,
+                "completion_unknown": False,
+            }
+        response_format = "tool_calls"
+        if not (getattr(response, "tool_calls", None) or []):
+            response_format = "text"
+        self._record_metrics(
+            context=context,
+            payload=payload,
+            latency_ms=latency_ms,
+            usage=usage,
+            finish_reason=self._extract_finish_reason_from_langchain_response(response),
+            response_format=response_format,
+            retry_count=0,
+            fallback_used=fallback_used,
+            usage_source="estimated" if usage.get("estimated") else "provider",
+            request_tokens_estimated=bool(usage.get("estimated")),
+            usage_from_provider=not bool(usage.get("estimated")),
+        )
         logger.info(
             "llm_call_success",
             extra={
@@ -576,7 +798,10 @@ class LLMClient:
                 "outcome": "success",
             },
         )
-        return response
+        return {
+            "content": getattr(response, "content", "") or "",
+            "tool_calls": getattr(response, "tool_calls", []) or [],
+        }
 
     async def invoke_tool_response(
         self,
@@ -590,6 +815,12 @@ class LLMClient:
         call_id = uuid4().hex[:12]
         provider = getattr(config, "provider", None) or self._default_provider
         model = getattr(config, "model", None) or self._default_model
+        config, _ = self._sanitize_config(
+            config,
+            provider=provider,
+            model=model,
+            context=context,
+        )
         metadata = self._attach_required_capabilities(
             dict(config.metadata or {}),
             LLMCapabilities(supports_tool_calls=True, supports_structured=False, supports_seed=config.seed is not None),
@@ -636,6 +867,31 @@ class LLMClient:
             raise
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+        usage = self._extract_usage_from_langchain_response(response)
+        if usage is None:
+            prompt_tokens = self._estimate_tokens_for_messages(messages, model=model)
+            output_text = getattr(response, "content", "") or ""
+            completion_tokens = self._estimate_tokens(output_text, model=model)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "estimated": True,
+                "completion_unknown": False,
+            }
+        self._record_metrics(
+            context=context,
+            payload=payload,
+            latency_ms=latency_ms,
+            usage=usage,
+            finish_reason=self._extract_finish_reason_from_langchain_response(response),
+            response_format="tool_response",
+            retry_count=0,
+            fallback_used=False,
+            usage_source="estimated" if usage.get("estimated") else "provider",
+            request_tokens_estimated=bool(usage.get("estimated")),
+            usage_from_provider=not bool(usage.get("estimated")),
+        )
         logger.info(
             "llm_call_success",
             extra={
@@ -678,6 +934,22 @@ class LLMClient:
             )
             provider = getattr(config, "provider", None) or self._default_provider
             model = getattr(config, "model", None) or self._default_model
+            config, _ = self._sanitize_config(
+                config,
+                provider=provider,
+                model=model,
+                context=context,
+            )
+            req = LLMRequest(
+                messages=req.messages,
+                model=config.model or model,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                max_output_tokens=config.max_tokens,
+                seed=config.seed,
+                credentials=req.credentials,
+                metadata=req.metadata or {},
+            )
             messages = [{"role": m.role, "content": m.content} for m in req.messages]
             payload = self._build_payload(
                 call_id=call_id,
@@ -708,6 +980,36 @@ class LLMClient:
                 )
                 raise
             latency_ms = int((time.perf_counter() - start) * 1000)
+            usage = {
+                "prompt_tokens": resp.usage.prompt_tokens if resp.usage else None,
+                "completion_tokens": resp.usage.completion_tokens if resp.usage else None,
+                "total_tokens": resp.usage.total_tokens if resp.usage else None,
+                "estimated": bool(resp.usage.estimated) if resp.usage else False,
+                "completion_unknown": False,
+            }
+            if not resp.usage or resp.usage.total_tokens == 0:
+                prompt_tokens = self._estimate_tokens_for_messages(messages, model=model)
+                completion_tokens = self._estimate_tokens(resp.content or "", model=model)
+                usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "estimated": True,
+                    "completion_unknown": False,
+                }
+            self._record_metrics(
+                context=context,
+                payload=payload,
+                latency_ms=latency_ms,
+                usage=usage,
+                finish_reason=resp.finish_reason,
+                response_format="text",
+                retry_count=(resp.raw or {}).get("retry_count") if isinstance(resp.raw, dict) else None,
+                fallback_used=(resp.raw or {}).get("fallback_used") if isinstance(resp.raw, dict) else None,
+                usage_source="estimated" if usage.get("estimated") else "provider",
+                request_tokens_estimated=bool(usage.get("estimated")),
+                usage_from_provider=not bool(usage.get("estimated")),
+            )
             logger.info(
                 "llm_call_success",
                 extra={
@@ -726,6 +1028,20 @@ class LLMClient:
         max_output_tokens = kwargs.get("max_output_tokens", 2048)
 
         metadata = kwargs.get("metadata") or {}
+        config = LLMConfig(
+            provider=self._default_provider,
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_output_tokens,
+            seed=kwargs.get("seed"),
+        )
+        config, _ = self._sanitize_config(
+            config,
+            provider=self._default_provider,
+            model=model,
+            context=context,
+        )
         if kwargs.get("seed") is not None:
             metadata = self._attach_required_capabilities(
                 metadata,
@@ -745,19 +1061,12 @@ class LLMClient:
         start = time.perf_counter()
         req = LLMRequest(
             messages=_normalize_messages(messages),
-            model=model,
-            temperature=temperature,
-            top_p=top_p,
-            max_output_tokens=max_output_tokens,
-            seed=kwargs.get("seed"),
+            model=config.model or model,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            max_output_tokens=config.max_tokens,
+            seed=config.seed,
             metadata=metadata,
-        )
-        config = LLMConfig(
-            provider=self._default_provider,
-            model=model,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_output_tokens,
         )
         router = self._build_router(config=config)
         try:
@@ -776,6 +1085,36 @@ class LLMClient:
             )
             raise
         latency_ms = int((time.perf_counter() - start) * 1000)
+        usage = {
+            "prompt_tokens": resp.usage.prompt_tokens if resp.usage else None,
+            "completion_tokens": resp.usage.completion_tokens if resp.usage else None,
+            "total_tokens": resp.usage.total_tokens if resp.usage else None,
+            "estimated": bool(resp.usage.estimated) if resp.usage else False,
+            "completion_unknown": False,
+        }
+        if not resp.usage or resp.usage.total_tokens == 0:
+            prompt_tokens = self._estimate_tokens_for_messages(messages, model=model)
+            completion_tokens = self._estimate_tokens(resp.content or "", model=model)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "estimated": True,
+                "completion_unknown": False,
+            }
+        self._record_metrics(
+            context=context,
+            payload=payload,
+            latency_ms=latency_ms,
+            usage=usage,
+            finish_reason=resp.finish_reason,
+            response_format="text",
+            retry_count=(resp.raw or {}).get("retry_count") if isinstance(resp.raw, dict) else None,
+            fallback_used=(resp.raw or {}).get("fallback_used") if isinstance(resp.raw, dict) else None,
+            usage_source="estimated" if usage.get("estimated") else "provider",
+            request_tokens_estimated=bool(usage.get("estimated")),
+            usage_from_provider=not bool(usage.get("estimated")),
+        )
         logger.info(
             "llm_call_success",
             extra={

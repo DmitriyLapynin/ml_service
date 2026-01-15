@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 import inspect
@@ -30,8 +31,9 @@ class ToolResult:
 
 
 class ToolRegistry:
-    def __init__(self):
+    def __init__(self, *, max_concurrency_global: int = 20):
         self._tools: Dict[str, ToolSpec] = {}
+        self._global_limiter = asyncio.Semaphore(max_concurrency_global) if max_concurrency_global > 0 else None
 
     def register(self, tool: ToolSpec) -> None:
         if tool.name in self._tools:
@@ -54,7 +56,8 @@ class ToolRegistry:
         call_id: str | None = None,
     ) -> ToolResult:
         call_id = call_id or uuid4().hex[:12]
-        state = state or {}
+        if state is None:
+            state = {}
         tool = self.get(name)
         if not tool:
             return ToolResult(
@@ -86,15 +89,27 @@ class ToolRegistry:
                 latency_ms=0,
             )
 
-        logging.info(f"tool_call_start name={name} call_id={call_id} trace_id={trace_id}")
+        logging.info(
+            "tool_call_start",
+            extra={"tool": name, "call_id": call_id, "trace_id": trace_id},
+        )
         start = time.perf_counter()
         try:
-            result = tool.handler(args, state)
-            if inspect.isawaitable(result):
-                result = await result
+            if self._global_limiter is None:
+                result = tool.handler(args, state)
+                if inspect.isawaitable(result):
+                    result = await result
+            else:
+                async with self._global_limiter:
+                    result = tool.handler(args, state)
+                    if inspect.isawaitable(result):
+                        result = await result
         except Exception as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
-            logging.info(f"tool_call_error name={name} call_id={call_id} trace_id={trace_id}")
+            logging.error(
+                "tool_call_error",
+                extra={"tool": name, "call_id": call_id, "trace_id": trace_id},
+            )
             return ToolResult(
                 tool_name=name,
                 call_id=call_id,
@@ -105,7 +120,10 @@ class ToolRegistry:
             )
 
         latency_ms = int((time.perf_counter() - start) * 1000)
-        logging.info(f"tool_call_success name={name} call_id={call_id} trace_id={trace_id}")
+        logging.info(
+            "tool_call_success",
+            extra={"tool": name, "call_id": call_id, "trace_id": trace_id},
+        )
         return ToolResult(
             tool_name=name,
             call_id=call_id,
@@ -218,12 +236,12 @@ def to_langchain_tool(tool: ToolSpec) -> object:
     return _tool_stub
 
 
-def default_registry() -> ToolRegistry:
-    registry = ToolRegistry()
+def default_registry(*, max_concurrency_global: int = 20) -> ToolRegistry:
+    registry = ToolRegistry(max_concurrency_global=max_concurrency_global)
     registry.register(
         ToolSpec(
             name="knowledge_search",
-            description="Поиск фактов и документов в базе знаний (заглушка).",
+            description="Вызови этот инструмент всегда, когда пользователь задает вопрос",
             schema={
                 "type": "object",
                 "properties": {

@@ -4,4 +4,7 @@ class FakePolicyResolver:
         return {
             "rag_enabled": channel == "chat",
             "allowed_tools": [],
+            "max_tool_calls": 5,
+            "max_tool_concurrency_per_request": 3,
+            "max_tool_concurrency_global": 20,
         }

@@ -45,7 +45,7 @@ class LLMCredentials:
 class LLMRequest:
     messages: Sequence[LLMMessage]
     model: str
-    temperature: float = 0.2
+    temperature: Optional[float] = 0.2
     max_output_tokens: int = 2048
     top_p: Optional[float] = None
     seed: Optional[int] = None
@@ -70,3 +70,4 @@ class LLMCallContext:
     channel: str | None = None
     tenant_id: str | None = None
     request_id: str | None = None
+    metrics: list[dict] | None = None

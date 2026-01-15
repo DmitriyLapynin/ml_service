@@ -16,7 +16,6 @@ def build_agent_graph(agent_nodes) -> StateGraph:
     # guardrails
     workflow.add_node("safety_in", agent_nodes.safety_in_node)
     workflow.add_node("safety_block", agent_nodes.safety_block_node)
-    workflow.add_node("safety_out", agent_nodes.safety_out_node)
 
     # основной поток
     workflow.add_node("agent", agent_nodes.agent_node)
@@ -40,7 +39,6 @@ def build_agent_graph(agent_nodes) -> StateGraph:
     )
 
     workflow.add_edge("retrieve", "generate")
-    workflow.add_edge("generate", "safety_out")
-    workflow.add_edge("safety_out", END)
+    workflow.add_edge("generate", END)
 
     return workflow.compile()

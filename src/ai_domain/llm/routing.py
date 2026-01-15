@@ -114,6 +114,19 @@ class LLMRouter:
             raw=resp.raw,
         )
 
+    def _with_raw(self, resp: LLMResponse, raw_extra: dict) -> LLMResponse:
+        merged = dict(resp.raw or {})
+        merged.update(raw_extra or {})
+        return LLMResponse(
+            content=resp.content,
+            model=resp.model,
+            provider=resp.provider,
+            usage=resp.usage,
+            latency_ms=resp.latency_ms,
+            finish_reason=resp.finish_reason,
+            raw=merged,
+        )
+
     async def generate(self, req: LLMRequest) -> LLMResponse:
         required_caps = self._required_capabilities(req)
         # выбираем модель по умолчанию из route, если не задана
@@ -129,7 +142,11 @@ class LLMRouter:
             metadata=req.metadata,
         )
 
+        attempts_primary = 0
+
         async def _call_primary():
+            nonlocal attempts_primary
+            attempts_primary += 1
             if not self._breaker.allow():
                 raise LLMUnavailable("Circuit breaker open")
             if not self._supports(self._providers[self._route.primary_provider], required_caps):
@@ -161,6 +178,10 @@ class LLMRouter:
 
         try:
             resp = await with_retries(_call_primary, policy=self._route.retry_policy)
+            resp = self._with_raw(
+                resp,
+                {"retry_count": max(0, attempts_primary - 1), "fallback_used": False},
+            )
             self._breaker.record_success()
             return resp
         except Exception as e:
@@ -182,7 +203,11 @@ class LLMRouter:
                     metadata=req.metadata,
                 )
 
+                attempts_fb = 0
+
                 async def _call_fb():
+                    nonlocal attempts_fb
+                    attempts_fb += 1
                     async with self._limiter:
                         start = time.perf_counter()
                         try:
@@ -208,5 +233,10 @@ class LLMRouter:
                             )
                             raise
 
-                return await with_retries(_call_fb, policy=RetryPolicy(max_attempts=2))
+                resp = await with_retries(_call_fb, policy=RetryPolicy(max_attempts=2))
+                resp = self._with_raw(
+                    resp,
+                    {"retry_count": max(0, attempts_fb - 1), "fallback_used": True},
+                )
+                return resp
             raise

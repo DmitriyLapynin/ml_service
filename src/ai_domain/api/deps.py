@@ -9,13 +9,15 @@ from ai_domain.fakes.fake_idempotency import FakeIdempotency
 from ai_domain.fakes.fake_policy_resolver import FakePolicyResolver
 from ai_domain.fakes.fake_telemetry import FakeTelemetry
 from ai_domain.fakes.fake_version_resolver import FakeVersionResolver
-from ai_domain.graphs.main_graph import build_graph
+from ai_domain.agent.graph import build_agent_graph
+from ai_domain.agent.nodes import AgentNodes
 from ai_domain.llm.circuit_breaker import CircuitBreaker
 from ai_domain.llm.client_cache import TTLRUClientCache
 from ai_domain.llm.client import LLMClient
 from ai_domain.llm.openai_provider import OpenAIProvider
 from ai_domain.llm.rate_limit import ConcurrencyLimiter
 from ai_domain.orchestrator.service import Orchestrator
+from ai_domain.orchestrator.context_builder import normalize_messages
 from ai_domain.rag.embedder import LocalEmbedder
 from ai_domain.rag.funnel_store import FunnelKBResolver
 from ai_domain.registry.prompts import PromptRepository, PromptNotFound
@@ -129,37 +131,67 @@ def get_kb_resolver() -> FunnelKBResolver:
 
 @lru_cache
 def get_tool_registry() -> ToolRegistry:
-    return default_registry()
+    return default_registry(max_concurrency_global=20)
 
 
 @lru_cache
 def get_orchestrator() -> Orchestrator:
     llm = get_llm_client()
-    prompt_repo = get_prompt_repo()
     telemetry = FakeTelemetry()
     tool_registry = get_tool_registry()
-    tool_executor = ToolExecutorAdapter(tool_registry)
     kb_resolver = get_kb_resolver()
     rag_client = ResolverRagClient(kb_resolver)
-    graph = build_graph(
-        deps=type(
-            "Deps",
-            (),
-            {
-                "llm": llm,
-                "prompt_repo": prompt_repo,
-                "tool_executor": tool_executor,
-                "telemetry": telemetry,
-                "rag_client": rag_client,
-            },
-        )()
-    )
+    graph = build_agent_graph(AgentNodes())
+
+    def _build_agent_state(
+        *,
+        request: dict,
+        versions: dict,
+        policies: dict,
+        credentials: dict | None,
+        task_configs: dict,
+        trace_id: str,
+        idempotency_key: str | None,
+        graph_name: str,
+    ) -> dict:
+        _ = versions, task_configs
+        model_name = request.get("model") or "gpt-4.1-mini"
+        return {
+            "trace_id": trace_id,
+            "tenant_id": request["tenant_id"],
+            "conversation_id": request["conversation_id"],
+            "channel": request["channel"],
+            "request_id": idempotency_key,
+            "graph": graph_name,
+            "messages": normalize_messages(request["messages"]),
+            "policies": policies,
+            "prompt": request.get("prompt"),
+            "role_instruction": request.get("role_instruction") or "",
+            "user_instruction": request.get("prompt"),
+            "is_rag": bool(request.get("is_rag", False)),
+            "tools": request.get("tools") or None,
+            "funnel_id": request.get("funnel_id"),
+            "model": model_name,
+            "model_params": request.get("model_params") or {},
+            "credentials": credentials or {},
+            "llm": llm,
+            "safety_llm": llm,
+            "safety_model": "gpt-4.1-nano",
+            "tool_registry": tool_registry,
+            "kb_resolver": kb_resolver,
+            "rag_client": rag_client,
+            "llm_metrics": [],
+            "runtime": {"degraded": False, "errors": []},
+        }
+
     return Orchestrator(
         graph=graph,
         idempotency=FakeIdempotency(),
         version_resolver=FakeVersionResolver(),
         policy_resolver=FakePolicyResolver(),
         telemetry=telemetry,
+        state_builder=_build_agent_state,
+        graph_name="agent_graph",
     )
 
 

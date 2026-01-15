@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Any
+import logging
 
 from ai_domain.llm.base import LLMProvider
 from ai_domain.llm.types import LLMRequest, LLMResponse, LLMUsage, LLMCapabilities
@@ -75,16 +76,37 @@ class OpenAIProvider(LLMProvider):
 
             # Синхронный SDK можно вызывать в threadpool, но если у тебя async SDK — используй его.
             # Для краткости оставлю прямой вызов. В проде лучше уйти в anyio.to_thread.run_sync
-            resp = client.chat.completions.create(
-                model=req.model,
-                messages=messages,
-                temperature=req.temperature,
-                max_tokens=req.max_output_tokens,
-                timeout=self.timeout_s,
-            )
+            params = {
+                "model": req.model,
+                "messages": messages,
+                "timeout": self.timeout_s,
+            }
+            if req.temperature is not None:
+                params["temperature"] = req.temperature
+            if req.model and req.model.startswith("gpt-5"):
+                params["max_completion_tokens"] = req.max_output_tokens
+            else:
+                params["max_tokens"] = req.max_output_tokens
+
+            resp = client.chat.completions.create(**params)
 
             content = (resp.choices[0].message.content or "").strip()
             usage = getattr(resp, "usage", None)
+            message_obj = resp.choices[0].message
+            message_dict = getattr(message_obj, "model_dump", None)
+            if callable(message_dict):
+                message_keys = list(message_dict().keys())
+            else:
+                message_keys = list(getattr(message_obj, "__dict__", {}).keys())
+            logging.info(
+                "openai_response",
+                extra={
+                    "choices_count": len(resp.choices),
+                    "content_length": len(content),
+                    "message_keys": message_keys,
+                    "content": content,
+                },
+            )
 
             return LLMResponse(
                 content=content,

@@ -9,6 +9,12 @@ from ai_domain.api.middleware import setup_middlewares
 from ai_domain.api.routes import router
 from ai_domain.api.deps import get_orchestrator
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
