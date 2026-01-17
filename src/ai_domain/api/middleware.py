@@ -92,10 +92,11 @@ class TraceLoggingMiddleware(BaseHTTPMiddleware):
                 "user_agent": user_agent,
                 "outcome": "error" if error else "success",
             }
+            payload = json.dumps(extra, ensure_ascii=False)
             if error:
-                self._logger.error(event, extra=extra)
+                self._logger.error(payload)
             else:
-                self._logger.info(event, extra=extra)
+                self._logger.info(payload)
             if response:
                 response.headers["X-Trace-Id"] = trace_id
 

@@ -2,6 +2,7 @@ import time
 
 from ai_domain.llm.types import LLMCallContext
 
+from ai_domain.llm.metrics import StateMetricsWriter
 from .safety_in import _check_unsafe_and_injection
 from .utils import ensure_lists, log_node, step_begin, step_end
 
@@ -24,7 +25,7 @@ async def safety_out_node(state: dict) -> dict:
             channel=state.get("channel"),
             tenant_id=state.get("tenant_id"),
             request_id=state.get("request_id"),
-            metrics=state.get("llm_metrics"),
+            metrics=state.get("metrics_writer") or StateMetricsWriter(state),
         )
         if trace_id
         else None

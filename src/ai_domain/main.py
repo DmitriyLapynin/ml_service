@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 import logging
 from fastapi import FastAPI
 
@@ -19,9 +20,19 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     # Warm up heavy dependencies early to fail fast on bad config.
-    logging.info("Warming up orchestrator...")
+    logging.info(
+        json.dumps(
+            {"event": "startup", "message": "Warming up orchestrator..."},
+            ensure_ascii=False,
+        )
+    )
     _ = get_orchestrator()
-    logging.info("Orchestrator warmed up")
+    logging.info(
+        json.dumps(
+            {"event": "startup", "message": "Orchestrator warmed up"},
+            ensure_ascii=False,
+        )
+    )
     yield
 
 

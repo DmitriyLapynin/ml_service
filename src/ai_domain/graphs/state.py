@@ -16,7 +16,6 @@ class MemoryState:
 class GraphState:
     trace_id: str
     tenant_id: str
-    conversation_id: str
     channel: str
 
     messages: List[Dict[str, str]]

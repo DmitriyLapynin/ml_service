@@ -4,6 +4,8 @@ import time
 from uuid import uuid4
 
 from ai_domain.orchestrator.context_builder import build_graph_state
+from ai_domain.telemetry.meta import build_meta_from_state
+from ai_domain.utils.hashing import messages_fingerprint
 from ai_domain.orchestrator.policy_resolver import PolicyBundle, build_task_configs
 
 
@@ -49,7 +51,7 @@ class Orchestrator:
         idempotency_key = request.get("idempotency_key")
         marked_in_progress = False
 
-        for key in ("tenant_id", "conversation_id", "channel", "messages"):
+        for key in ("tenant_id", "channel", "messages"):
             if key not in request or request[key] is None:
                 raise OrchestratorError(
                     f"Missing required field: {key}",
@@ -141,7 +143,6 @@ class Orchestrator:
             else:
                 state = build_graph_state(
                     tenant_id=request["tenant_id"],
-                    conversation_id=request["conversation_id"],
                     channel=request["channel"],
                     messages=request["messages"],
                     versions=versions,
@@ -160,6 +161,31 @@ class Orchestrator:
                     trace_id=trace_id,
                     graph_name=self.graph_name,
                 )
+
+            metrics_writer = (
+                state.get("metrics_writer") if isinstance(state, dict) else getattr(state, "metrics_writer", None)
+            )
+            if metrics_writer and hasattr(metrics_writer, "begin_trace"):
+                msg_fp = messages_fingerprint(request.get("messages") or [])
+                run_id = metrics_writer.begin_trace(
+                    {
+                        "name": "ai_request",
+                        "metadata": {
+                            "trace_id": trace_id,
+                            "tenant_id": request.get("tenant_id"),
+                            "channel": request.get("channel"),
+                            "graph_name": self.graph_name,
+                            "versions": versions,
+                        },
+                        "inputs": {
+                            "input_fingerprint": msg_fp.get("digest"),
+                            "messages_count": msg_fp.get("count"),
+                            "total_chars": msg_fp.get("total_chars"),
+                        },
+                    }
+                )
+                if run_id and isinstance(state, dict):
+                    state.setdefault("trace", {}).setdefault("langsmith", {})["run_id"] = run_id
 
             # 5️⃣ Run graph
             result_state = await self.graph.ainvoke(state)
@@ -184,40 +210,43 @@ class Orchestrator:
                 "trace_id": trace_id,
                 "versions": _get("versions"),
             }
-            meta = _get("meta") or {}
-            meta.setdefault("graph", _get("graph") or _get("graph_name") or self.graph_name)
-            meta.setdefault("graph_name", _get("graph_name") or self.graph_name)
-            meta.setdefault("graph_version", _get("graph_version"))
-            meta.setdefault("route", _get("route") or request.get("channel"))
-            meta.setdefault("start_ts", start_ts)
-            meta.setdefault("end_ts", end_ts)
-            meta.setdefault("total_latency_ms", total_latency_ms)
-            meta.setdefault("degraded", degraded)
-            meta.setdefault("errors", runtime.get("errors") or [])
-            meta.setdefault("steps", runtime.get("steps") or [])
-            llm_metrics = _get("llm_metrics")
-            if llm_metrics:
-                meta.setdefault("llm_calls", llm_metrics)
-            tool_call_meta = _get("tool_call_meta")
-            if tool_call_meta:
-                meta.setdefault("tool_calls", tool_call_meta)
-            rag_meta = _get("rag_meta")
-            if rag_meta is None:
-                rag_meta = {
-                    "enabled": bool(request.get("is_rag", False)),
-                    "config_id": request.get("funnel_id"),
-                    "top_k": None,
-                    "query": None,
-                    "retrieval_latency_ms": 0,
-                    "documents": [],
-                    "deduped_count": 0,
-                    "final_context_chars": 0,
-                    "context_truncated": False,
-                    "truncate_reason": None,
-                    "rerank_used": False,
-                }
-            meta.setdefault("rag", rag_meta)
-            response["meta"] = meta
+            meta = None
+            allow_meta = bool(request.get("debug") or policies_with_model.get("return_trace_meta"))
+            if allow_meta:
+                meta = build_meta_from_state(
+                    result_state,
+                    route=request.get("channel"),
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    total_latency_ms=total_latency_ms,
+                    degraded=degraded,
+                    default_graph_name=self.graph_name,
+                    rag_defaults={
+                        "enabled": bool(request.get("is_rag", False)),
+                        "config_id": request.get("funnel_id"),
+                        "top_k": None,
+                        "query": None,
+                        "retrieval_latency_ms": 0,
+                        "documents": [],
+                        "deduped_count": 0,
+                        "final_context_chars": 0,
+                        "context_truncated": False,
+                        "truncate_reason": None,
+                        "rerank_used": False,
+                    },
+                )
+                response["meta"] = meta
+
+            metrics_writer = _get("metrics_writer")
+            if metrics_writer and hasattr(metrics_writer, "finalize"):
+                metrics_writer.finalize(
+                    {
+                        "trace_id": trace_id,
+                        "status": response["status"],
+                        "route": request.get("channel"),
+                        "degraded": degraded,
+                    }
+                )
             if meta is not None:
                 response["meta"] = meta
 

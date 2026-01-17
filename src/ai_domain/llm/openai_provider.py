@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Any
+import json
 import logging
 
 from ai_domain.llm.base import LLMProvider
@@ -99,13 +100,16 @@ class OpenAIProvider(LLMProvider):
             else:
                 message_keys = list(getattr(message_obj, "__dict__", {}).keys())
             logging.info(
-                "openai_response",
-                extra={
-                    "choices_count": len(resp.choices),
-                    "content_length": len(content),
-                    "message_keys": message_keys,
-                    "content": content,
-                },
+                json.dumps(
+                    {
+                        "event": "openai_response",
+                        "choices_count": len(resp.choices),
+                        "content_length": len(content),
+                        "message_keys": message_keys,
+                        "content": content,
+                    },
+                    ensure_ascii=False,
+                )
             )
 
             return LLMResponse(

@@ -70,4 +70,4 @@ class LLMCallContext:
     channel: str | None = None
     tenant_id: str | None = None
     request_id: str | None = None
-    metrics: list[dict] | None = None
+    metrics: Any | None = None

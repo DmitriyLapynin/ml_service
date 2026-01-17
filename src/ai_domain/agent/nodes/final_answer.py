@@ -1,8 +1,11 @@
+import json
 import logging
 import time
 
 from ai_domain.llm.client import LLMConfig
+from ai_domain.llm.metrics import StateMetricsWriter
 from ai_domain.llm.types import LLMCallContext
+from ai_domain.utils.memory import select_memory_messages
 
 from .prompts import (
     GENERAL_WITH_INSTRUCTION_PROMPT,
@@ -19,7 +22,23 @@ async def generate_node(state: dict) -> dict:
     step_index = step_begin(state, "generate")
     start = time.perf_counter()
     state["executed"].append("generate")
-    messages = state.get("messages") or []
+    full_messages = state.get("messages") or []
+    messages = select_memory_messages(state)
+    trimmed = len(full_messages) - len(messages)
+    if trimmed > 0:
+        logging.info(
+            json.dumps(
+                {
+                    "event": "messages_trimmed",
+                    "trace_id": state.get("trace_id"),
+                    "node": "generate",
+                    "trimmed_count": trimmed,
+                    "kept_count": len(messages),
+                    "total_count": len(full_messages),
+                },
+                ensure_ascii=False,
+            )
+        )
     tool_messages = state.get("tool_messages") or []
     llm = state.get("llm")
     is_rag = bool(state.get("is_rag", False))
@@ -28,12 +47,16 @@ async def generate_node(state: dict) -> dict:
     role_instruction = state.get("role_instruction") or ""
 
     logging.info(
-        "node_generate_start",
-        extra={
-            "trace_id": state.get("trace_id"),
-            "has_tools": bool(tool_messages),
-            "is_rag": is_rag,
-        },
+        json.dumps(
+            {
+                "event": "node_generate_start",
+                "trace_id": state.get("trace_id"),
+                "node": "generate",
+                "has_tools": bool(tool_messages),
+                "is_rag": is_rag,
+            },
+            ensure_ascii=False,
+        )
     )
 
     if not user_instruction or not str(user_instruction).strip():
@@ -103,7 +126,7 @@ async def generate_node(state: dict) -> dict:
             channel=state.get("channel"),
             tenant_id=state.get("tenant_id"),
             request_id=state.get("request_id"),
-            metrics=state.get("llm_metrics"),
+            metrics=state.get("metrics_writer") or StateMetricsWriter(state),
         )
         if trace_id
         else None
@@ -123,8 +146,15 @@ async def generate_node(state: dict) -> dict:
         if not isinstance(text, str):
             text = getattr(response, "content", response)
         logging.info(
-            "node_generate_raw_response",
-            extra={"trace_id": state.get("trace_id"), "content": text},
+            json.dumps(
+                {
+                    "event": "node_generate_raw_response",
+                    "trace_id": state.get("trace_id"),
+                    "node": "generate",
+                    "content": text,
+                },
+                ensure_ascii=False,
+            )
         )
         state["answer"] = {"text": text, "format": "plain"}
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -139,13 +169,27 @@ async def generate_node(state: dict) -> dict:
 
     if sub_query_results and is_rag:
         logging.info(
-            "node_generate_prompt_path",
-            extra={"trace_id": state.get("trace_id"), "prompt_path": "rag"},
+            json.dumps(
+                {
+                    "event": "node_generate_prompt_path",
+                    "trace_id": state.get("trace_id"),
+                    "node": "generate",
+                    "prompt_path": "rag",
+                },
+                ensure_ascii=False,
+            )
         )
     else:
         logging.info(
-            "node_generate_prompt_path",
-            extra={"trace_id": state.get("trace_id"), "prompt_path": "no_rag"},
+            json.dumps(
+                {
+                    "event": "node_generate_prompt_path",
+                    "trace_id": state.get("trace_id"),
+                    "node": "generate",
+                    "prompt_path": "no_rag",
+                },
+                ensure_ascii=False,
+            )
         )
 
     final_answer = await llm.invoke_text(
@@ -154,8 +198,15 @@ async def generate_node(state: dict) -> dict:
         context=context,
     )
     logging.info(
-        "node_generate_raw_response",
-        extra={"trace_id": state.get("trace_id"), "content": final_answer},
+        json.dumps(
+            {
+                "event": "node_generate_raw_response",
+                "trace_id": state.get("trace_id"),
+                "node": "generate",
+                "content": final_answer,
+            },
+            ensure_ascii=False,
+        )
     )
     state["answer"] = {"text": final_answer, "format": "plain"}
     latency_ms = int((time.perf_counter() - start) * 1000)

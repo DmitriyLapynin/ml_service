@@ -14,6 +14,7 @@ from ai_domain.agent.nodes import AgentNodes
 from ai_domain.llm.circuit_breaker import CircuitBreaker
 from ai_domain.llm.client_cache import TTLRUClientCache
 from ai_domain.llm.client import LLMClient
+from ai_domain.llm.metrics import CompositeMetricsWriter, LangSmithWriter, StateMetricsWriter
 from ai_domain.llm.openai_provider import OpenAIProvider
 from ai_domain.llm.rate_limit import ConcurrencyLimiter
 from ai_domain.orchestrator.service import Orchestrator
@@ -156,10 +157,17 @@ def get_orchestrator() -> Orchestrator:
     ) -> dict:
         _ = versions, task_configs
         model_name = request.get("model") or "gpt-4.1-mini"
-        return {
+        settings = get_settings()
+        trace = {
+            "steps": [],
+            "llm_calls": [],
+            "tool_calls": [],
+            "rag": None,
+            "errors": [],
+        }
+        state = {
             "trace_id": trace_id,
             "tenant_id": request["tenant_id"],
-            "conversation_id": request["conversation_id"],
             "channel": request["channel"],
             "request_id": idempotency_key,
             "graph": graph_name,
@@ -173,6 +181,8 @@ def get_orchestrator() -> Orchestrator:
             "funnel_id": request.get("funnel_id"),
             "model": model_name,
             "model_params": request.get("model_params") or {},
+            "memory_strategy": request.get("memory_strategy"),
+            "memory_params": request.get("memory_params") or {},
             "credentials": credentials or {},
             "llm": llm,
             "safety_llm": llm,
@@ -180,9 +190,25 @@ def get_orchestrator() -> Orchestrator:
             "tool_registry": tool_registry,
             "kb_resolver": kb_resolver,
             "rag_client": rag_client,
-            "llm_metrics": [],
+            "trace": trace,
             "runtime": {"degraded": False, "errors": []},
         }
+        langsmith_api_key = get_secret("LANGSMITH_API_KEY") or get_secret("LANGCHAIN_API_KEY")
+        langsmith_writer = LangSmithWriter(
+            trace_id=trace_id,
+            project_name=settings.langsmith_project,
+            enabled=True,
+            api_key=langsmith_api_key,
+            endpoint=settings.langsmith_endpoint,
+            inputs={
+                "trace_id": trace_id,
+                "channel": request.get("channel"),
+            },
+        )
+        state["metrics_writer"] = CompositeMetricsWriter(
+            [StateMetricsWriter(state), langsmith_writer]
+        )
+        return state
 
     return Orchestrator(
         graph=graph,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import os
+import json
 import logging
 import time
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Type
@@ -31,7 +33,7 @@ from ai_domain.llm.types import (
     StructuredResult,
 )
 from ai_domain.llm.model_caps import get_model_capabilities
-from ai_domain.utils.hashing import messages_fingerprint
+from ai_domain.utils.hashing import messages_fingerprint, hash_text_short
 from ai_domain.secrets import get_secret
 from ai_domain.tools.registry import ToolSpec, to_langchain_tool
 
@@ -243,6 +245,13 @@ class LLMClient:
         joined = "\n".join(f"{m.get('role','')}:{m.get('content','')}" for m in messages)
         return self._estimate_tokens(joined, model=model)
 
+    def _output_meta(self, text: str) -> Dict[str, Any]:
+        text = text or ""
+        return {
+            "output_chars": len(text),
+            "output_fingerprint": hash_text_short(text) if text else None,
+        }
+
     def _record_metrics(
         self,
         *,
@@ -252,6 +261,7 @@ class LLMClient:
         usage: Dict[str, Any],
         **extra: Any,
     ) -> None:
+        self._log_llm_call_end(payload=payload, latency_ms=latency_ms, usage=usage, **extra)
         if not context or context.metrics is None:
             return
         entry = {
@@ -265,7 +275,76 @@ class LLMClient:
             "usage": usage,
         }
         entry.update(extra)
-        context.metrics.append(entry)
+        add_llm_call = getattr(context.metrics, "add_llm_call", None)
+        if callable(add_llm_call):
+            add_llm_call(entry)
+            return
+        try:
+            context.metrics.append(entry)
+        except Exception:
+            return
+
+    def _log_llm_call_end(
+        self,
+        *,
+        payload: Dict[str, Any],
+        latency_ms: int,
+        usage: Dict[str, Any] | None,
+        **extra: Any,
+    ) -> None:
+        logger = logging.getLogger(__name__)
+        usage = usage or {}
+        logger.info(
+            json.dumps(
+                {
+                    "event": "llm_call_end",
+                    "op": extra.get("op") or payload.get("task"),
+                    "trace_id": payload.get("trace_id"),
+                    "node": payload.get("node"),
+                    "provider": payload.get("provider"),
+                    "model": payload.get("model"),
+                    "latency_ms": latency_ms,
+                    "usage_prompt_tokens": usage.get("prompt_tokens"),
+                    "usage_completion_tokens": usage.get("completion_tokens"),
+                    "usage_total_tokens": usage.get("total_tokens"),
+                    "retry_count": extra.get("retry_count"),
+                    "fallback_used": extra.get("fallback_used"),
+                    "circuit_breaker_open": extra.get("circuit_breaker_open"),
+                    "finish_reason": extra.get("finish_reason"),
+                    "response_format": extra.get("response_format"),
+                    "parse_ok": extra.get("parse_ok"),
+                    "schema_name": extra.get("schema_name") or payload.get("schema"),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    def _debug_enabled(self) -> bool:
+        return os.getenv("AI_DOMAIN_DEBUG_LOGGING", "false").lower() in {"1", "true", "yes"}
+
+    def _log_llm_debug_messages(
+        self,
+        *,
+        payload: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        response: Any,
+    ) -> None:
+        if not self._debug_enabled():
+            return
+        logger = logging.getLogger(__name__)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "llm_debug_messages",
+                    "trace_id": payload.get("trace_id"),
+                    "node": payload.get("node"),
+                    "messages": messages,
+                    "response": response,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        )
 
     def _extract_usage_from_langchain_response(self, response: Any) -> Dict[str, Any] | None:
         meta = getattr(response, "response_metadata", None) or {}
@@ -410,7 +489,7 @@ class LLMClient:
             messages=messages,
             metadata=metadata,
         )
-        logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+        logger.info(json.dumps({"event": "llm_call_start", **payload}, ensure_ascii=False))
         start = time.perf_counter()
         req = LLMRequest(
             messages=_normalize_messages(messages),
@@ -428,15 +507,23 @@ class LLMClient:
             print(resp)
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
+            self._log_llm_call_end(
+                payload=payload,
+                latency_ms=latency_ms,
+                usage=None,
+                response_format="text",
+            )
             logger.exception(
-                "llm_call_error",
-                extra={
-                    "event": "llm_call_error",
-                    **payload,
-                    "latency_ms": latency_ms,
-                    "outcome": "error",
-                    "error_kind": self._classify_error(e),
-                },
+                json.dumps(
+                    {
+                        "event": "llm_call_error",
+                        **payload,
+                        "latency_ms": latency_ms,
+                        "outcome": "error",
+                        "error_kind": self._classify_error(e),
+                    },
+                    ensure_ascii=False,
+                )
             )
             raise
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -462,6 +549,7 @@ class LLMClient:
             payload=payload,
             latency_ms=latency_ms,
             usage=usage,
+            **self._output_meta(resp.content or ""),
             finish_reason=resp.finish_reason,
             response_format="text",
             retry_count=(resp.raw or {}).get("retry_count") if isinstance(resp.raw, dict) else None,
@@ -471,13 +559,20 @@ class LLMClient:
             usage_from_provider=not bool(usage.get("estimated")),
         )
         logger.info(
-            "llm_call_success",
-            extra={
-                "event": "llm_call_success",
-                **payload,
-                "latency_ms": latency_ms,
-                "outcome": "success",
-            },
+            json.dumps(
+                {
+                    "event": "llm_call_success",
+                    **payload,
+                    "latency_ms": latency_ms,
+                    "outcome": "success",
+                },
+                ensure_ascii=False,
+            )
+        )
+        self._log_llm_debug_messages(
+            payload=payload,
+            messages=messages,
+            response=resp.content,
         )
         return resp.content
 
@@ -517,7 +612,7 @@ class LLMClient:
             messages=messages,
             metadata=metadata,
         )
-        logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+        logger.info(json.dumps({"event": "llm_call_start", **payload}, ensure_ascii=False))
         start = time.perf_counter()
 
         router = self._build_router(config=config)
@@ -568,15 +663,25 @@ class LLMClient:
             result = await structured.ainvoke(lc_messages)
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
+            self._log_llm_call_end(
+                payload=payload,
+                latency_ms=latency_ms,
+                usage=None,
+                response_format="structured",
+                parse_ok=False,
+                schema_name=schema.__name__,
+            )
             logger.exception(
-                "llm_call_error",
-                extra={
-                    "event": "llm_call_error",
-                    **payload,
-                    "latency_ms": latency_ms,
-                    "outcome": "error",
-                    "error_kind": self._classify_error(e),
-                },
+                json.dumps(
+                    {
+                        "event": "llm_call_error",
+                        **payload,
+                        "latency_ms": latency_ms,
+                        "outcome": "error",
+                        "error_kind": self._classify_error(e),
+                    },
+                    ensure_ascii=False,
+                )
             )
             raise
 
@@ -601,6 +706,7 @@ class LLMClient:
             payload=payload,
             latency_ms=latency_ms,
             usage=usage,
+            **self._output_meta(output_text),
             finish_reason=None,
             response_format="structured",
             retry_count=None,
@@ -608,16 +714,25 @@ class LLMClient:
             usage_source="estimated",
             request_tokens_estimated=True,
             usage_from_provider=False,
+            parse_ok=True,
+            schema_name=schema.__name__,
         )
         logger.info(
-            "llm_call_success",
-            extra={
-                "event": "llm_call_success",
-                **payload,
-                "latency_ms": latency_ms,
-                "outcome": "success",
-                "include_raw": include_raw,
-            },
+            json.dumps(
+                {
+                    "event": "llm_call_success",
+                    **payload,
+                    "latency_ms": latency_ms,
+                    "outcome": "success",
+                    "include_raw": include_raw,
+                },
+                ensure_ascii=False,
+            )
+        )
+        self._log_llm_debug_messages(
+            payload=payload,
+            messages=messages,
+            response=result,
         )
 
         if include_raw:
@@ -685,7 +800,7 @@ class LLMClient:
         )
         payload["tool_calling"] = True
         payload["tools_count"] = len(tools)
-        logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+        logger.info(json.dumps({"event": "llm_call_start", **payload}, ensure_ascii=False))
         start = time.perf_counter()
         fallback_used = False
 
@@ -720,20 +835,28 @@ class LLMClient:
         except Exception as e:
             self._breaker.record_failure(e)
             latency_ms = int((time.perf_counter() - start) * 1000)
+            self._log_llm_call_end(
+                payload=payload,
+                latency_ms=latency_ms,
+                usage=None,
+                response_format="tool_calls",
+            )
             logger.exception(
-                "llm_call_error",
-                extra={
-                    "event": "llm_call_error",
-                    **payload,
-                    "latency_ms": latency_ms,
-                    "outcome": "error",
-                    "error_kind": self._classify_error(e),
-                },
+                json.dumps(
+                    {
+                        "event": "llm_call_error",
+                        **payload,
+                        "latency_ms": latency_ms,
+                        "outcome": "error",
+                        "error_kind": self._classify_error(e),
+                    },
+                    ensure_ascii=False,
+                )
             )
             if self._fallback_provider and self._fallback_provider != provider:
                 fallback_provider = self._fallback_provider
                 payload["provider"] = fallback_provider
-                logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+                logger.info(json.dumps({"event": "llm_call_start", **payload}, ensure_ascii=False))
                 start = time.perf_counter()
                 try:
                     if not self._breaker.allow():
@@ -746,15 +869,23 @@ class LLMClient:
                 except Exception as fallback_error:
                     self._breaker.record_failure(fallback_error)
                     latency_ms = int((time.perf_counter() - start) * 1000)
+                    self._log_llm_call_end(
+                        payload=payload,
+                        latency_ms=latency_ms,
+                        usage=None,
+                        response_format="tool_calls",
+                    )
                     logger.exception(
-                        "llm_call_error",
-                        extra={
-                            "event": "llm_call_error",
-                            **payload,
-                            "latency_ms": latency_ms,
-                            "outcome": "error",
-                            "error_kind": self._classify_error(fallback_error),
-                        },
+                        json.dumps(
+                            {
+                                "event": "llm_call_error",
+                                **payload,
+                                "latency_ms": latency_ms,
+                                "outcome": "error",
+                                "error_kind": self._classify_error(fallback_error),
+                            },
+                            ensure_ascii=False,
+                        )
                     )
                     raise
             else:
@@ -774,13 +905,15 @@ class LLMClient:
                 "completion_unknown": False,
             }
         response_format = "tool_calls"
-        if not (getattr(response, "tool_calls", None) or []):
+        tool_call_list = getattr(response, "tool_calls", None) or []
+        if not tool_call_list:
             response_format = "text"
         self._record_metrics(
             context=context,
             payload=payload,
             latency_ms=latency_ms,
             usage=usage,
+            **self._output_meta(getattr(response, "content", "") or ""),
             finish_reason=self._extract_finish_reason_from_langchain_response(response),
             response_format=response_format,
             retry_count=0,
@@ -790,12 +923,22 @@ class LLMClient:
             usage_from_provider=not bool(usage.get("estimated")),
         )
         logger.info(
-            "llm_call_success",
-            extra={
-                "event": "llm_call_success",
-                **payload,
-                "latency_ms": latency_ms,
-                "outcome": "success",
+            json.dumps(
+                {
+                    "event": "llm_call_success",
+                    **payload,
+                    "latency_ms": latency_ms,
+                    "outcome": "success",
+                },
+                ensure_ascii=False,
+            )
+        )
+        self._log_llm_debug_messages(
+            payload=payload,
+            messages=messages,
+            response={
+                "content": getattr(response, "content", "") or "",
+                "tool_calls": getattr(response, "tool_calls", []) or [],
             },
         )
         return {
@@ -837,7 +980,7 @@ class LLMClient:
         )
         payload["tool_calling"] = True
         payload["tools_count"] = 0
-        logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+        logger.info(json.dumps({"event": "llm_call_start", **payload}, ensure_ascii=False))
         start = time.perf_counter()
 
         lc_messages = self._to_langchain_messages(messages)
@@ -854,15 +997,23 @@ class LLMClient:
             response = await llm.ainvoke(lc_messages)
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
+            self._log_llm_call_end(
+                payload=payload,
+                latency_ms=latency_ms,
+                usage=None,
+                response_format="tool_response",
+            )
             logger.exception(
-                "llm_call_error",
-                extra={
-                    "event": "llm_call_error",
-                    **payload,
-                    "latency_ms": latency_ms,
-                    "outcome": "error",
-                    "error_kind": self._classify_error(e),
-                },
+                json.dumps(
+                    {
+                        "event": "llm_call_error",
+                        **payload,
+                        "latency_ms": latency_ms,
+                        "outcome": "error",
+                        "error_kind": self._classify_error(e),
+                    },
+                    ensure_ascii=False,
+                )
             )
             raise
 
@@ -884,6 +1035,7 @@ class LLMClient:
             payload=payload,
             latency_ms=latency_ms,
             usage=usage,
+            **self._output_meta(getattr(response, "content", "") or ""),
             finish_reason=self._extract_finish_reason_from_langchain_response(response),
             response_format="tool_response",
             retry_count=0,
@@ -893,13 +1045,20 @@ class LLMClient:
             usage_from_provider=not bool(usage.get("estimated")),
         )
         logger.info(
-            "llm_call_success",
-            extra={
-                "event": "llm_call_success",
-                **payload,
-                "latency_ms": latency_ms,
-                "outcome": "success",
-            },
+            json.dumps(
+                {
+                    "event": "llm_call_success",
+                    **payload,
+                    "latency_ms": latency_ms,
+                    "outcome": "success",
+                },
+                ensure_ascii=False,
+            )
+        )
+        self._log_llm_debug_messages(
+            payload=payload,
+            messages=messages,
+            response=getattr(response, "content", "") or "",
         )
         return getattr(response, "content", "") or ""
 
@@ -961,22 +1120,30 @@ class LLMClient:
                 messages=messages,
                 metadata=req.metadata or {},
             )
-            logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+            logger.info(json.dumps({"event": "llm_call_start", **payload}, ensure_ascii=False))
             start = time.perf_counter()
             router = self._build_router(config=config)
             try:
                 resp = await router.generate(req)
             except Exception as e:
                 latency_ms = int((time.perf_counter() - start) * 1000)
+                self._log_llm_call_end(
+                    payload=payload,
+                    latency_ms=latency_ms,
+                    usage=None,
+                    response_format="text",
+                )
                 logger.exception(
-                    "llm_call_error",
-                    extra={
-                        "event": "llm_call_error",
-                        **payload,
-                        "latency_ms": latency_ms,
-                        "outcome": "error",
-                        "error_kind": self._classify_error(e),
-                    },
+                    json.dumps(
+                        {
+                            "event": "llm_call_error",
+                            **payload,
+                            "latency_ms": latency_ms,
+                            "outcome": "error",
+                            "error_kind": self._classify_error(e),
+                        },
+                        ensure_ascii=False,
+                    )
                 )
                 raise
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -1011,13 +1178,15 @@ class LLMClient:
                 usage_from_provider=not bool(usage.get("estimated")),
             )
             logger.info(
-                "llm_call_success",
-                extra={
-                    "event": "llm_call_success",
-                    **payload,
-                    "latency_ms": latency_ms,
-                    "outcome": "success",
-                },
+                json.dumps(
+                    {
+                        "event": "llm_call_success",
+                        **payload,
+                        "latency_ms": latency_ms,
+                        "outcome": "success",
+                    },
+                    ensure_ascii=False,
+                )
             )
             return resp
 
@@ -1057,7 +1226,7 @@ class LLMClient:
             messages=messages,
             metadata=metadata,
         )
-        logger.info("llm_call_start", extra={"event": "llm_call_start", **payload})
+        logger.info(json.dumps({"event": "llm_call_start", **payload}, ensure_ascii=False))
         start = time.perf_counter()
         req = LLMRequest(
             messages=_normalize_messages(messages),
@@ -1073,15 +1242,23 @@ class LLMClient:
             resp = await router.generate(req)
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
+            self._log_llm_call_end(
+                payload=payload,
+                latency_ms=latency_ms,
+                usage=None,
+                response_format="text",
+            )
             logger.exception(
-                "llm_call_error",
-                extra={
-                    "event": "llm_call_error",
-                    **payload,
-                    "latency_ms": latency_ms,
-                    "outcome": "error",
-                    "error_kind": self._classify_error(e),
-                },
+                json.dumps(
+                    {
+                        "event": "llm_call_error",
+                        **payload,
+                        "latency_ms": latency_ms,
+                        "outcome": "error",
+                        "error_kind": self._classify_error(e),
+                    },
+                    ensure_ascii=False,
+                )
             )
             raise
         latency_ms = int((time.perf_counter() - start) * 1000)
@@ -1107,6 +1284,7 @@ class LLMClient:
             payload=payload,
             latency_ms=latency_ms,
             usage=usage,
+            **self._output_meta(resp.content or ""),
             finish_reason=resp.finish_reason,
             response_format="text",
             retry_count=(resp.raw or {}).get("retry_count") if isinstance(resp.raw, dict) else None,
@@ -1116,12 +1294,14 @@ class LLMClient:
             usage_from_provider=not bool(usage.get("estimated")),
         )
         logger.info(
-            "llm_call_success",
-            extra={
-                "event": "llm_call_success",
-                **payload,
-                "latency_ms": latency_ms,
-                "outcome": "success",
-            },
+            json.dumps(
+                {
+                    "event": "llm_call_success",
+                    **payload,
+                    "latency_ms": latency_ms,
+                    "outcome": "success",
+                },
+                ensure_ascii=False,
+            )
         )
         return resp

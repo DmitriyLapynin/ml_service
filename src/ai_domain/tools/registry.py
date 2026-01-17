@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 import inspect
@@ -8,6 +9,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 
+from ai_domain.utils.hashing import hash_text_short
 
 ToolHandler = Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any] | Awaitable[Dict[str, Any]]]
 
@@ -60,6 +62,16 @@ class ToolRegistry:
             state = {}
         tool = self.get(name)
         if not tool:
+            _log_tool_call_end(
+                name=name,
+                call_id=call_id,
+                trace_id=trace_id,
+                latency_ms=0,
+                ok=False,
+                error_code="tool_not_found",
+                args=args,
+                result={"message": "Tool not registered"},
+            )
             return ToolResult(
                 tool_name=name,
                 call_id=call_id,
@@ -69,6 +81,16 @@ class ToolRegistry:
                 latency_ms=0,
             )
         if not tool.handler:
+            _log_tool_call_end(
+                name=name,
+                call_id=call_id,
+                trace_id=trace_id,
+                latency_ms=0,
+                ok=False,
+                error_code="tool_not_implemented",
+                args=args,
+                result={"message": "Tool handler is missing"},
+            )
             return ToolResult(
                 tool_name=name,
                 call_id=call_id,
@@ -80,6 +102,16 @@ class ToolRegistry:
 
         validation_error = _validate_args(tool.schema, args)
         if validation_error:
+            _log_tool_call_end(
+                name=name,
+                call_id=call_id,
+                trace_id=trace_id,
+                latency_ms=0,
+                ok=False,
+                error_code="invalid_args",
+                args=args,
+                result={"message": validation_error},
+            )
             return ToolResult(
                 tool_name=name,
                 call_id=call_id,
@@ -90,8 +122,15 @@ class ToolRegistry:
             )
 
         logging.info(
-            "tool_call_start",
-            extra={"tool": name, "call_id": call_id, "trace_id": trace_id},
+            json.dumps(
+                {
+                    "event": "tool_call_start",
+                    "tool": name,
+                    "call_id": call_id,
+                    "trace_id": trace_id,
+                },
+                ensure_ascii=False,
+            )
         )
         start = time.perf_counter()
         try:
@@ -107,8 +146,25 @@ class ToolRegistry:
         except Exception as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
             logging.error(
-                "tool_call_error",
-                extra={"tool": name, "call_id": call_id, "trace_id": trace_id},
+                json.dumps(
+                    {
+                        "event": "tool_call_error",
+                        "tool": name,
+                        "call_id": call_id,
+                        "trace_id": trace_id,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            _log_tool_call_end(
+                name=name,
+                call_id=call_id,
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+                ok=False,
+                error_code="tool_error",
+                args=args,
+                result={"message": str(exc)},
             )
             return ToolResult(
                 tool_name=name,
@@ -121,8 +177,25 @@ class ToolRegistry:
 
         latency_ms = int((time.perf_counter() - start) * 1000)
         logging.info(
-            "tool_call_success",
-            extra={"tool": name, "call_id": call_id, "trace_id": trace_id},
+            json.dumps(
+                {
+                    "event": "tool_call_success",
+                    "tool": name,
+                    "call_id": call_id,
+                    "trace_id": trace_id,
+                },
+                ensure_ascii=False,
+            )
+        )
+        _log_tool_call_end(
+            name=name,
+            call_id=call_id,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            ok=True,
+            error_code=None,
+            args=args,
+            result=result,
         )
         return ToolResult(
             tool_name=name,
@@ -234,6 +307,43 @@ def to_langchain_tool(tool: ToolSpec) -> object:
         _ = kwargs
         return ""
     return _tool_stub
+
+
+def _log_tool_call_end(
+    *,
+    name: str,
+    call_id: str,
+    trace_id: str | None,
+    latency_ms: int,
+    ok: bool,
+    error_code: str | None,
+    args: Dict[str, Any],
+    result: Any,
+) -> None:
+    try:
+        args_json = json.dumps(args, sort_keys=True, default=str)
+    except Exception:
+        args_json = str(args)
+    try:
+        result_json = json.dumps(result, sort_keys=True, default=str)
+    except Exception:
+        result_json = str(result)
+    logging.info(
+        json.dumps(
+            {
+                "event": "tool_call_end",
+                "trace_id": trace_id,
+                "tool_name": name,
+                "latency_ms": latency_ms,
+                "ok": ok,
+                "error_code": error_code,
+                "args_fingerprint": hash_text_short(args_json),
+                "result_fingerprint": hash_text_short(result_json),
+                "result_size_chars": len(result_json),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def default_registry(*, max_concurrency_global: int = 20) -> ToolRegistry:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List
 
 from dotenv import load_dotenv
@@ -19,7 +20,10 @@ class APISettings:
     allowed_origins: List[str] = None
     rag_base_dir: str = "data/funnels"
     default_tenant_id: str | None = None
-    default_conversation_id: str = "demo"
+    langsmith_tracing: bool = False
+    langsmith_project: str | None = None
+    langsmith_endpoint: str | None = None
+    debug_logging: bool = False
 
     @classmethod
     def from_env(cls) -> "APISettings":
@@ -33,5 +37,13 @@ class APISettings:
             allowed_origins=_split_csv(allowed) if allowed else [],
             rag_base_dir=os.getenv("RAG_BASE_DIR", "data/funnels"),
             default_tenant_id=os.getenv("API_DEFAULT_TENANT_ID") or None,
-            default_conversation_id=os.getenv("API_DEFAULT_CONVERSATION_ID", "demo"),
+            langsmith_tracing=os.getenv("LANGSMITH_TRACING", "false").lower() in {"1", "true", "yes"},
+            langsmith_project=os.getenv("LANGSMITH_PROJECT"),
+            langsmith_endpoint=os.getenv("LANGSMITH_ENDPOINT"),
+            debug_logging=os.getenv("AI_DOMAIN_DEBUG_LOGGING", "false").lower() in {"1", "true", "yes"},
         )
+
+
+@lru_cache
+def get_settings() -> APISettings:
+    return APISettings.from_env()

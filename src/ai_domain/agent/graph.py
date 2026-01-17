@@ -1,3 +1,4 @@
+import json
 import logging
 from langgraph.graph import StateGraph, START, END
 
@@ -9,7 +10,16 @@ def build_agent_graph(agent_nodes) -> StateGraph:
     Строит граф RAG-агента с guardrails (вход/выход).
     Узел agent пока заглушка, но место под него выделено.
     """
-    logging.info("Построение графа RAG-агента с guardrails...")
+    logging.info(
+        json.dumps(
+            {
+                "event": "graph_build",
+                "graph": "agent_graph",
+                "message": "Построение графа RAG-агента с guardrails...",
+            },
+            ensure_ascii=False,
+        )
+    )
 
     workflow = StateGraph(dict)
 

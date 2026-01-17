@@ -22,7 +22,6 @@ def normalize_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
 def build_graph_state(
     *,
     tenant_id: str,
-    conversation_id: str,
     channel: str,
     messages: List[Dict[str, str]],
     versions: Dict[str, str],
@@ -44,7 +43,6 @@ def build_graph_state(
     return GraphState(
         trace_id=trace_id or str(uuid4()),
         tenant_id=tenant_id,
-        conversation_id=conversation_id,
         channel=channel,
         messages=normalize_messages(messages),
         route=None,

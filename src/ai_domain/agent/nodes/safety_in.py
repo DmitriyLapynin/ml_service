@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from typing import Any, Dict
@@ -11,6 +12,7 @@ from ai_domain.agent.safety_prompt import (
 from ai_domain.llm.client import LLMConfig
 from ai_domain.llm.types import LLMCallContext
 
+from ai_domain.llm.metrics import StateMetricsWriter
 from .utils import ensure_lists, log_node, mark_runtime_error, step_begin, step_end
 
 
@@ -70,7 +72,17 @@ async def _check_unsafe_and_injection(
                 llm_unsafe = bool(parsed["unsafe"])
                 llm_injection = bool(parsed["injection_suspected"])
         except Exception as e:
-            logging.error(f"Ошибка при LLM-классификации безопасности: {e}")
+            logging.error(
+                json.dumps(
+                    {
+                        "event": "safety_llm_error",
+                        "trace_id": call_context.trace_id if call_context else None,
+                        "node": "safety_in",
+                        "error": str(e),
+                    },
+                    ensure_ascii=False,
+                )
+            )
             if state is not None:
                 mark_runtime_error(
                     state,
@@ -102,7 +114,7 @@ async def safety_in_node(state: dict) -> dict:
             channel=state.get("channel"),
             tenant_id=state.get("tenant_id"),
             request_id=state.get("request_id"),
-            metrics=state.get("llm_metrics"),
+            metrics=state.get("metrics_writer") or StateMetricsWriter(state),
         )
         if trace_id
         else None

@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 
@@ -11,10 +12,15 @@ def log_node(state: dict, event: str) -> None:
     trace_id = state.get("trace_id")
     graph = state.get("graph") or state.get("graph_name")
     logging.info(
-        "agent_node_event node=%s trace_id=%s graph=%s",
-        event,
-        trace_id,
-        graph,
+        json.dumps(
+            {
+                "event": "node_event",
+                "trace_id": trace_id,
+                "node": event,
+                "graph": graph,
+            },
+            ensure_ascii=False,
+        )
     )
 
 
@@ -40,8 +46,8 @@ def mark_runtime_error(
 
 
 def step_begin(state: dict, node: str) -> int:
-    runtime = state.setdefault("runtime", {})
-    steps = runtime.setdefault("steps", [])
+    trace = state.setdefault("trace", {})
+    steps = trace.setdefault("steps", [])
     started_at = int(time.time() * 1000)
     entry = {
         "node": node,
@@ -49,6 +55,19 @@ def step_begin(state: dict, node: str) -> int:
         "status": "running",
     }
     steps.append(entry)
+    logging.info(
+        json.dumps(
+            {
+                "event": "node_start",
+                "trace_id": state.get("trace_id"),
+                "node": node,
+            },
+            ensure_ascii=False,
+        )
+    )
+    writer = state.get("metrics_writer")
+    if writer and hasattr(writer, "begin_step"):
+        writer.begin_step({"index": len(steps) - 1, "node": node, "started_at": started_at})
     return len(steps) - 1
 
 
@@ -60,9 +79,32 @@ def step_end(
     status: str = "ok",
     reason: str | None = None,
 ) -> None:
-    steps = state.setdefault("runtime", {}).setdefault("steps", [])
+    steps = state.setdefault("trace", {}).setdefault("steps", [])
     if 0 <= index < len(steps):
         steps[index]["latency_ms"] = latency_ms
         steps[index]["status"] = status
         if reason:
             steps[index]["reason"] = reason
+    logging.info(
+        json.dumps(
+            {
+                "event": "node_end",
+                "trace_id": state.get("trace_id"),
+                "node": steps[index]["node"] if 0 <= index < len(steps) else None,
+                "latency_ms": latency_ms,
+                "status": status,
+                "error_code": reason,
+            },
+            ensure_ascii=False,
+        )
+    )
+    writer = state.get("metrics_writer")
+    if writer and hasattr(writer, "end_step"):
+        writer.end_step(
+            {
+                "index": index,
+                "status": status,
+                "reason": reason,
+                "latency_ms": latency_ms,
+            }
+        )

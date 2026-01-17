@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from typing import List
@@ -7,6 +8,7 @@ from ai_domain.llm.types import LLMCallContext
 from ai_domain.tools.registry import ToolSpec, default_registry
 
 from .prompts import create_agent_prompt, create_agent_prompt_short
+from ai_domain.llm.metrics import StateMetricsWriter
 from .utils import ensure_lists, log_node, mark_runtime_error, step_begin, step_end
 
 
@@ -41,7 +43,18 @@ async def agent_node(state: dict) -> dict:
         tools = default_registry().list()
     tools = _normalize_tools(list(tools))
     is_rag = bool(state.get("is_rag", True))
-    logging.info("agent_node rag=%s tools=%s", is_rag, len(tools))
+    logging.info(
+        json.dumps(
+            {
+                "event": "agent_node",
+                "trace_id": state.get("trace_id"),
+                "node": "agent",
+                "rag": is_rag,
+                "tools_count": len(tools),
+            },
+            ensure_ascii=False,
+        )
+    )
     llm = state.get("llm")
     use_tool_calls = hasattr(llm, "invoke_tool_calls")
     if not use_tool_calls:
@@ -68,8 +81,26 @@ async def agent_node(state: dict) -> dict:
     state["filtered_tools"] = _format_tools(tools, is_rag)
     state["tool_calls"] = []
     state["wants_retrieve"] = False
+    state.setdefault("trace", {}).setdefault("agent", {})
 
     if use_tool_calls and state["filtered_tools"]:
+        full_messages = state.get("messages") or []
+        history = full_messages[-5:]
+        trimmed = len(full_messages) - len(history)
+        if trimmed > 0:
+            logging.info(
+                json.dumps(
+                    {
+                        "event": "messages_trimmed",
+                        "trace_id": state.get("trace_id"),
+                        "node": "agent",
+                        "trimmed_count": trimmed,
+                        "kept_count": len(history),
+                        "total_count": len(full_messages),
+                    },
+                    ensure_ascii=False,
+                )
+            )
         trace_id = state.get("trace_id")
         call_context = (
             LLMCallContext(
@@ -80,7 +111,7 @@ async def agent_node(state: dict) -> dict:
                 channel=state.get("channel"),
                 tenant_id=state.get("tenant_id"),
                 request_id=state.get("request_id"),
-                metrics=state.get("llm_metrics"),
+                metrics=state.get("metrics_writer") or StateMetricsWriter(state),
             )
             if trace_id
             else None
@@ -90,7 +121,7 @@ async def agent_node(state: dict) -> dict:
         if tool_choice:
             metadata["tool_choice"] = tool_choice
         response = await llm.invoke_tool_calls(
-            [{"role": "system", "content": state["agent_prompt"]}, *state.get("messages", [])],
+            [{"role": "system", "content": state["agent_prompt"]}, *history],
             tools=state["filtered_tools"],
             config=LLMConfig(
                 model="gpt-4.1-mini",
@@ -106,14 +137,16 @@ async def agent_node(state: dict) -> dict:
             tool_calls = tool_calls[:max_calls]
         state["tool_calls"] = tool_calls
         state["wants_retrieve"] = bool(tool_calls)
-        state["messages"] = [
-            *state.get("messages", []),
-            {
-                "role": "assistant",
-                "content": (response or {}).get("content") or "",
-                "tool_calls": tool_calls,
-            },
-        ]
+        if tool_calls:
+            state["messages"] = [
+                *state.get("messages", []),
+                {
+                    "role": "assistant",
+                    "content": (response or {}).get("content") or "",
+                    "tool_calls": tool_calls,
+                },
+            ]
+    state["trace"]["agent"]["decision"] = "tools" if state.get("tool_calls") else "no_tools"
     latency_ms = int((time.perf_counter() - start) * 1000)
     step_end(state, index=step_index, latency_ms=latency_ms, status="ok")
     return state
