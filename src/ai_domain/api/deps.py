@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from functools import lru_cache
 from typing import Any
 
@@ -19,8 +20,10 @@ from ai_domain.llm.openai_provider import OpenAIProvider
 from ai_domain.llm.rate_limit import ConcurrencyLimiter
 from ai_domain.orchestrator.service import Orchestrator
 from ai_domain.orchestrator.context_builder import normalize_messages
+import os
+
 from ai_domain.rag.embedder import LocalEmbedder
-from ai_domain.rag.funnel_store import FunnelKBResolver
+from ai_domain.rag.funnel_store import FunnelKBResolver, FunnelKBStore
 from ai_domain.registry.prompts import PromptRepository, PromptNotFound
 from ai_domain.registry.static_prompt_repo import StaticPromptRepo
 from ai_domain.registry.supabase_connector import create_supabase_client_from_env, SupabaseConfigError
@@ -126,8 +129,25 @@ def get_prompt_repo():
 @lru_cache
 def get_kb_resolver() -> FunnelKBResolver:
     settings = get_settings()
-    embedder = LocalEmbedder(model_path="embeddings_models/rubert-mini-frida")
+    models_dir = os.getenv("AI_DOMAIN_MODELS_DIR", "embeddings_models")
+    embedder = LocalEmbedder(model_path=str(Path(models_dir) / "rubert-mini-frida"))
     return FunnelKBResolver(base_dir=settings.rag_base_dir, embedder=embedder)
+
+
+@lru_cache
+def get_kb_store() -> FunnelKBStore:
+    settings = get_settings()
+    models_dir = os.getenv("AI_DOMAIN_MODELS_DIR", "embeddings_models")
+    embedder = LocalEmbedder(model_path=str(Path(models_dir) / "rubert-mini-frida"))
+    return FunnelKBStore(base_dir=settings.rag_base_dir, embedder=embedder)
+
+
+@lru_cache
+def get_supabase_client() -> Any | None:
+    try:
+        return create_supabase_client_from_env()
+    except SupabaseConfigError:
+        return None
 
 
 @lru_cache

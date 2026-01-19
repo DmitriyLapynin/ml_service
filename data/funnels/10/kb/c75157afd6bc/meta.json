@@ -1,0 +1,11 @@
+{
+  "chunks": 15,
+  "kb_id": "c75157afd6bc",
+  "original_filename": "Dental_Clinic_Knowledge_Base.txt",
+  "source_path": "data/funnels/_uploads/10/c75157afd6bc/Dental_Clinic_Knowledge_Base.txt",
+  "created_at": "2026-01-19T12:26:15.170850Z",
+  "chunk_size": 400,
+  "overlap": 80,
+  "min_chunk_chars": 120,
+  "embedder_model": "embeddings_models/rubert-mini-frida"
+}

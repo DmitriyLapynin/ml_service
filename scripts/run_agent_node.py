@@ -1,7 +1,9 @@
 import argparse
 import asyncio
+import os
 import json
 import logging
+from pathlib import Path
 
 from ai_domain.agent.nodes import agent_node
 from ai_domain.llm.circuit_breaker import CircuitBreaker
@@ -37,8 +39,10 @@ async def main():
     args = parser.parse_args()
 
     llm = build_live_llm()
-    embedder = LocalEmbedder(model_path="embeddings_models/rubert-mini-frida")
-    resolver = FunnelKBResolver(base_dir="data/funnels", embedder=embedder)
+    models_dir = os.getenv("AI_DOMAIN_MODELS_DIR", "embeddings_models")
+    data_dir = os.getenv("AI_DOMAIN_DATA_DIR", "data")
+    embedder = LocalEmbedder(model_path=str(Path(models_dir) / "rubert-mini-frida"))
+    resolver = FunnelKBResolver(base_dir=str(Path(data_dir) / "funnels"), embedder=embedder)
     state = {
         "trace_id": "agent-node-local",
         "graph": "rag_agent",

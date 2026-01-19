@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import json
 import logging
+import os
+from pathlib import Path
 from fastapi import FastAPI
 
 from ai_domain.api.exception_handlers import register_exception_handlers
@@ -33,6 +35,11 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             ensure_ascii=False,
         )
     )
+    data_dir = Path(os.getenv("AI_DOMAIN_DATA_DIR", "data"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    probe_path = data_dir / ".rw_check"
+    probe_path.write_text("ok", encoding="utf-8")
+    probe_path.unlink()
     yield
 
 

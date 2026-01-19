@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -43,7 +44,9 @@ class FunnelKBStore:
     def _save_manifest(self, funnel_id: str, payload: Dict[str, Any]) -> None:
         path = self._manifest_path(funnel_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
 
     def add_document(
         self,
@@ -55,6 +58,8 @@ class FunnelKBStore:
         overlap: int = 80,
         min_chunk_chars: int = 120,
         store_source: bool = True,
+        supabase_client: Any | None = None,
+        file_id: str | None = None,
     ) -> str:
         source_path = Path(source_path)
         kb_id = kb_id or uuid4().hex[:12]
@@ -72,15 +77,21 @@ class FunnelKBStore:
             chunk_size=chunk_size,
             overlap=overlap,
             min_chunk_chars=min_chunk_chars,
+            supabase_client=supabase_client,
+            file_id=file_id,
+            funnel_id=funnel_id,
+            kb_id=kb_id,
         )
 
         index_path = kb_dir / "faiss.index"
         chunks_path = kb_dir / "chunks.json"
         meta_path = kb_dir / "meta.json"
+        mapping_path = kb_dir / "mapping.jsonl"
         kb.save(
             index_path=index_path,
             chunks_path=chunks_path,
             meta_path=meta_path,
+            mapping_path=mapping_path,
             extra_meta={
                 "kb_id": kb_id,
                 "original_filename": source_path.name,
@@ -90,6 +101,16 @@ class FunnelKBStore:
                 "overlap": overlap,
                 "min_chunk_chars": min_chunk_chars,
                 "embedder_model": getattr(self.embedder, "model_path", None),
+            },
+        )
+        logging.info(
+            "faiss_built",
+            extra={
+                "event": "faiss_built",
+                "vectors_count": len(kb._chunks),
+                "path": str(index_path),
+                "funnel_id": funnel_id,
+                "kb_id": kb_id,
             },
         )
 

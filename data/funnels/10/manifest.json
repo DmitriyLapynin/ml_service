@@ -2,11 +2,34 @@
   "funnel_id": "10",
   "documents": [
     {
-      "kb_id": "58bd918d0fd0",
+      "kb_id": "0d3ecc2acab1",
+      "status": "deleted",
+      "original_filename": "Dental_Clinic_Knowledge_Base.txt",
+      "source_path": "data/funnels/_uploads/10/0d3ecc2acab1/Dental_Clinic_Knowledge_Base.txt",
+      "created_at": "2026-01-18T17:13:19.382003Z",
+      "deleted_at": "2026-01-18T17:13:46.525080Z"
+    },
+    {
+      "kb_id": "989dbd6f0219",
+      "status": "deleted",
+      "original_filename": "Dental_Clinic_Knowledge_Base.txt",
+      "source_path": "data/funnels/_uploads/10/989dbd6f0219/Dental_Clinic_Knowledge_Base.txt",
+      "created_at": "2026-01-18T17:14:05.856531Z",
+      "deleted_at": "2026-01-19T12:25:32.513499Z"
+    },
+    {
+      "kb_id": "561b2e3090cf",
       "status": "active",
       "original_filename": "Материнский капитал на покупку квартиры в новостройке: как использовать, инструкция.pdf",
-      "source_path": "Материнский капитал на покупку квартиры в новостройке: как использовать, инструкция.pdf",
-      "created_at": "2026-01-14T11:58:04.341670Z"
+      "source_path": "data/funnels/_uploads/10/561b2e3090cf/Материнский капитал на покупку квартиры в новостройке: как использовать, инструкция.pdf",
+      "created_at": "2026-01-18T17:16:45.894386Z"
+    },
+    {
+      "kb_id": "c75157afd6bc",
+      "status": "active",
+      "original_filename": "Dental_Clinic_Knowledge_Base.txt",
+      "source_path": "data/funnels/_uploads/10/c75157afd6bc/Dental_Clinic_Knowledge_Base.txt",
+      "created_at": "2026-01-19T12:26:15.175813Z"
     }
   ]
 }

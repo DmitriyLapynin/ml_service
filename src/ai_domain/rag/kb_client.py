@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple, Protocol
 
@@ -30,6 +32,152 @@ class KBChunk:
     text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _extract_metadata_int(meta: Dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = meta.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_metadata_str(meta: Dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = meta.get(key)
+        if value is None:
+            continue
+        return str(value)
+    return None
+
+
+def _insert_kb_chunks(
+    sb: Any | None,
+    *,
+    file_id: str | None,
+    funnel_id: str | None,
+    kb_id: str | None,
+    chunks: Sequence[KBChunk],
+    batch_size: int = 200,
+) -> bool:
+    if sb is None or not file_id or not funnel_id or not kb_id:
+        return False
+    try:
+        existing = sb.table("kb_chunks").select("id").eq("file_id", file_id).limit(1).execute()
+        if getattr(existing, "data", None):
+            logging.info(
+                "kb_chunks_skipped",
+                extra={"event": "kb_chunks_skipped", "file_id": file_id},
+            )
+            return False
+    except Exception as exc:
+        logging.warning(
+            "supabase_kb_chunks_check_failed",
+            extra={"event": "supabase_kb_chunks_check_failed", "error": str(exc)},
+        )
+        return False
+    records: List[Dict[str, Any]] = []
+    for idx, chunk in enumerate(chunks):
+        meta = chunk.metadata or {}
+        records.append(
+            {
+                "file_id": file_id,
+                "funnel_id": funnel_id,
+                "kb_id": kb_id,
+                "chunk_index": idx,
+                "text": chunk.text,
+                "text_hash": _sha256_text(chunk.text),
+                "char_start": _extract_metadata_int(meta, "offset_start", "char_start"),
+                "char_end": _extract_metadata_int(meta, "offset_end", "char_end"),
+                "page": _extract_metadata_int(meta, "page_number", "page"),
+                "sheet": _extract_metadata_str(meta, "sheet_name", "sheet"),
+                "metadata": meta,
+            }
+        )
+    for offset in range(0, len(records), batch_size):
+        batch = records[offset : offset + batch_size]
+        try:
+            resp = sb.table("kb_chunks").insert(batch).execute()
+            data = resp.data or []
+            index_map = {item.get("chunk_index"): item.get("id") for item in data if item.get("chunk_index") is not None}
+            for idx, chunk in enumerate(chunks[offset : offset + batch_size]):
+                chunk_id = index_map.get(idx + offset)
+                if chunk_id and chunk.metadata is not None:
+                    chunk.metadata["chunk_id"] = chunk_id
+        except Exception as exc:
+            logging.warning(
+                "supabase_kb_chunks_insert_failed",
+                extra={"event": "supabase_kb_chunks_insert_failed", "error": str(exc)},
+            )
+    logging.info(
+        "kb_chunks_written",
+        extra={
+            "event": "kb_chunks_written",
+            "funnel_id": funnel_id,
+            "kb_id": kb_id,
+            "count": len(records),
+        },
+    )
+    return True
+
+
+def _insert_kb_embeddings(
+    sb: Any | None,
+    *,
+    chunks: Sequence[KBChunk],
+    embeddings: np.ndarray,
+    model_name: str,
+    model_version: str,
+    batch_size: int = 200,
+) -> None:
+    if sb is None:
+        return
+    records: List[Dict[str, Any]] = []
+    dim = int(embeddings.shape[1]) if embeddings.ndim == 2 else 0
+    for idx, chunk in enumerate(chunks):
+        chunk_id = (chunk.metadata or {}).get("chunk_id")
+        if not chunk_id:
+            continue
+        vector = embeddings[idx].tolist()
+        norm = float(np.linalg.norm(embeddings[idx]))
+        records.append(
+            {
+                "chunk_id": chunk_id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "dim": dim,
+                "embedding": vector,
+                "norm": norm,
+            }
+        )
+    if not records:
+        return
+    for offset in range(0, len(records), batch_size):
+        batch = records[offset : offset + batch_size]
+        try:
+            sb.table("kb_embeddings").insert(batch).execute()
+        except Exception as exc:
+            logging.warning(
+                "supabase_kb_embeddings_insert_failed",
+                extra={"event": "supabase_kb_embeddings_insert_failed", "error": str(exc)},
+            )
+    logging.info(
+        "kb_embeddings_written",
+        extra={
+            "event": "kb_embeddings_written",
+            "count": len(records),
+            "dim": dim,
+            "model_version": model_version,
+            "model_name": model_name,
+        },
+    )
 
 def _chunk_text(text: str, *, chunk_size: int, overlap: int) -> List[Tuple[int, int, str]]:
     if chunk_size <= 0:
@@ -157,6 +305,12 @@ def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
     return vectors / norms
 
 
+def _atomic_write_text(path: Path, payload: str) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(payload, encoding="utf-8")
+    tmp_path.replace(path)
+
+
 class FaissKBClient:
     def __init__(
         self,
@@ -179,6 +333,10 @@ class FaissKBClient:
         overlap: int = 100,
         min_chunk_chars: int = 120,
         chunker: Chunker | None = None,
+        supabase_client: Any | None = None,
+        file_id: str | None = None,
+        funnel_id: str | None = None,
+        kb_id: str | None = None,
     ) -> "FaissKBClient":
         try:
             import faiss  # type: ignore
@@ -212,7 +370,20 @@ class FaissKBClient:
                         },
                     )
                 )
-            return cls._build_index(chunks, embedder, faiss)
+            chunks_inserted = _insert_kb_chunks(
+                supabase_client,
+                file_id=file_id,
+                funnel_id=funnel_id,
+                kb_id=kb_id,
+                chunks=chunks,
+            )
+            return cls._build_index(
+                chunks,
+                embedder,
+                faiss,
+                supabase_client=supabase_client,
+                write_embeddings=chunks_inserted,
+            )
 
         documents = [{"text": text, "metadata": {"source": str(path)}}]
         return cls.from_documents(
@@ -222,6 +393,10 @@ class FaissKBClient:
             overlap=overlap,
             min_chunk_chars=min_chunk_chars,
             chunker=chunker,
+            supabase_client=supabase_client,
+            file_id=file_id,
+            funnel_id=funnel_id,
+            kb_id=kb_id,
         )
 
     @classmethod
@@ -234,6 +409,10 @@ class FaissKBClient:
         overlap: int = 100,
         min_chunk_chars: int = 120,
         chunker: Chunker | None = None,
+        supabase_client: Any | None = None,
+        file_id: str | None = None,
+        funnel_id: str | None = None,
+        kb_id: str | None = None,
     ) -> "FaissKBClient":
         try:
             import faiss  # type: ignore
@@ -267,7 +446,20 @@ class FaissKBClient:
                     metadata=chunk_meta,
                 )
             )
-        return cls._build_index(chunks, embedder, faiss)
+        chunks_inserted = _insert_kb_chunks(
+            supabase_client,
+            file_id=file_id,
+            funnel_id=funnel_id,
+            kb_id=kb_id,
+            chunks=chunks,
+        )
+        return cls._build_index(
+            chunks,
+            embedder,
+            faiss,
+            supabase_client=supabase_client,
+            write_embeddings=chunks_inserted,
+        )
 
     @classmethod
     def from_path(
@@ -279,6 +471,10 @@ class FaissKBClient:
         overlap: int = 100,
         min_chunk_chars: int = 120,
         chunker: Chunker | None = None,
+        supabase_client: Any | None = None,
+        file_id: str | None = None,
+        funnel_id: str | None = None,
+        kb_id: str | None = None,
     ) -> "FaissKBClient":
         documents = load_documents(path)
         return cls.from_documents(
@@ -288,6 +484,10 @@ class FaissKBClient:
             overlap=overlap,
             min_chunk_chars=min_chunk_chars,
             chunker=chunker,
+            supabase_client=supabase_client,
+            file_id=file_id,
+            funnel_id=funnel_id,
+            kb_id=kb_id,
         )
 
     @classmethod
@@ -296,6 +496,10 @@ class FaissKBClient:
         chunks: Sequence[KBChunk],
         embedder: LocalEmbedder,
         faiss_module: Any,
+        *,
+        supabase_client: Any | None = None,
+        model_version: str | None = None,
+        write_embeddings: bool = True,
     ) -> "FaissKBClient":
         embeddings = embedder.embed_texts([c.text for c in chunks])
         if embeddings.size == 0:
@@ -304,6 +508,14 @@ class FaissKBClient:
             embeddings = np.array(embeddings, dtype="float32")
         embeddings = embeddings.astype("float32")
         embeddings = _l2_normalize(embeddings)
+        if write_embeddings:
+            _insert_kb_embeddings(
+                supabase_client,
+                chunks=chunks,
+                embeddings=embeddings,
+                model_name=getattr(embedder, "model_path", "unknown"),
+                model_version=model_version or "unknown",
+            )
         dim = embeddings.shape[1]
         index = faiss_module.IndexFlatIP(dim)
         index.add(embeddings)
@@ -345,6 +557,7 @@ class FaissKBClient:
         index_path: str | Path,
         chunks_path: str | Path,
         meta_path: str | Path | None = None,
+        mapping_path: str | Path | None = None,
         extra_meta: Dict[str, Any] | None = None,
     ) -> None:
         try:
@@ -357,14 +570,25 @@ class FaissKBClient:
         index_path.parent.mkdir(parents=True, exist_ok=True)
         chunks_path.parent.mkdir(parents=True, exist_ok=True)
 
-        faiss.write_index(self._index, str(index_path))
+        tmp_index = index_path.with_suffix(index_path.suffix + ".tmp")
+        faiss.write_index(self._index, str(tmp_index))
+        tmp_index.replace(index_path)
         chunks_payload = [
             {"id": c.id, "text": c.text, "metadata": c.metadata} for c in self._chunks
         ]
-        chunks_path.write_text(
+        _atomic_write_text(
+            chunks_path,
             json.dumps(chunks_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
+        if mapping_path:
+            mapping_path = Path(mapping_path)
+            mapping_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_mapping = mapping_path.with_suffix(mapping_path.suffix + ".tmp")
+            with tmp_mapping.open("w", encoding="utf-8") as handle:
+                for idx, chunk in enumerate(self._chunks):
+                    payload = {"vector_id": idx, "chunk_id": chunk.metadata.get("chunk_id")}
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            tmp_mapping.replace(mapping_path)
 
         if meta_path:
             meta_path = Path(meta_path)
@@ -374,7 +598,7 @@ class FaissKBClient:
             }
             if extra_meta:
                 meta.update(extra_meta)
-            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            _atomic_write_text(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
 
     @classmethod
     def load(

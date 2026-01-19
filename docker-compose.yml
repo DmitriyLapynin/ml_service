@@ -1,0 +1,18 @@
+services:
+  ai-domain:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      AI_DOMAIN_SECRETS_DIR: /secrets
+    volumes:
+      - ai_domain_data:/data
+      - ai_domain_models:/models
+      - /Users/dmitrij/secrets:/secrets:ro
+    restart: unless-stopped
+
+volumes:
+  ai_domain_data:
+    name: ai_domain_data
+  ai_domain_models:
+    name: ai_domain_models

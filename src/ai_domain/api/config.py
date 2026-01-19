@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import List
@@ -18,7 +19,7 @@ class APISettings:
     log_level: str = "info"
     debug: bool = False
     allowed_origins: List[str] = None
-    rag_base_dir: str = "data/funnels"
+    rag_base_dir: str = str(Path(os.getenv("AI_DOMAIN_DATA_DIR", "data")) / "funnels")
     default_tenant_id: str | None = None
     langsmith_tracing: bool = False
     langsmith_project: str | None = None
@@ -29,13 +30,14 @@ class APISettings:
     def from_env(cls) -> "APISettings":
         load_dotenv()
         allowed = os.getenv("API_ALLOWED_ORIGINS", "")
+        data_dir = Path(os.getenv("AI_DOMAIN_DATA_DIR", "data"))
         return cls(
             host=os.getenv("API_HOST", "0.0.0.0"),
             port=int(os.getenv("API_PORT", "8000")),
             log_level=os.getenv("API_LOG_LEVEL", "info"),
             debug=os.getenv("API_DEBUG", "false").lower() in {"1", "true", "yes"},
             allowed_origins=_split_csv(allowed) if allowed else [],
-            rag_base_dir=os.getenv("RAG_BASE_DIR", "data/funnels"),
+            rag_base_dir=os.getenv("RAG_BASE_DIR", str(data_dir / "funnels")),
             default_tenant_id=os.getenv("API_DEFAULT_TENANT_ID") or None,
             langsmith_tracing=os.getenv("LANGSMITH_TRACING", "false").lower() in {"1", "true", "yes"},
             langsmith_project=os.getenv("LANGSMITH_PROJECT"),

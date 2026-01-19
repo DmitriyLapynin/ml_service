@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Iterable, List, Optional
 
 import numpy as np
@@ -8,7 +9,7 @@ import numpy as np
 
 @dataclass
 class LocalEmbedder:
-    model_path: str = "embeddings_models/rubert-mini-frida"
+    model_path: str = os.path.join(os.getenv("AI_DOMAIN_MODELS_DIR", "embeddings_models"), "rubert-mini-frida")
     device: Optional[str] = None
     batch_size: int = 32
     normalize: bool = True

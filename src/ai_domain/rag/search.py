@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -17,10 +18,13 @@ class FaissSearchService:
         cls,
         *,
         path: str | Path,
-        model_path: str = "embeddings_models/rubert-mini-frida",
+        model_path: str = "",
         chunk_size: int = 800,
         overlap: int = 100,
     ) -> "FaissSearchService":
+        if not model_path:
+            models_dir = os.getenv("AI_DOMAIN_MODELS_DIR", "embeddings_models")
+            model_path = str(Path(models_dir) / "rubert-mini-frida")
         embedder = LocalEmbedder(model_path=model_path)
         kb_client = FaissKBClient.from_path(
             path=path,

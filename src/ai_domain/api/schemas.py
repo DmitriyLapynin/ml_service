@@ -179,6 +179,33 @@ class SystemAnalysisResponse(BaseModel):
     meta: Dict[str, Any] | None = None
 
 
+class KBUploadResponse(BaseModel):
+    status: Literal["created", "already_exists", "error"]
+    trace_id: str
+    funnel_id: str
+    kb_id: str
+    file_id: str
+    source_name: str
+    source_type: str
+    bytes_size: int
+    content_hash: str
+    is_duplicate: bool
+    message: str
+
+
+class KBDeleteResponse(BaseModel):
+    status: Literal["deleted", "not_found", "conflict"]
+    trace_id: str
+    funnel_id: str
+    kb_id: str
+    manifest_updated: bool
+    local_index_deleted: bool
+    supabase_file_found: bool
+    deleted_files: int
+    deleted_chunks: int
+    deleted_embeddings: int
+
+
 class ErrorResponse(BaseModel):
     error: str
     trace_id: Optional[str] = None
