@@ -47,7 +47,14 @@ class Orchestrator:
     async def run(self, request: Dict[str, Any]) -> Dict[str, Any]:
         start_ts = int(time.time() * 1000)
         start = time.perf_counter()
-        trace_id = request.get("trace_id") or str(uuid4())
+        trace_id = request.get("trace_id")
+        if not trace_id:
+            raise OrchestratorError(
+                "trace_id is required",
+                status_code=400,
+                code="missing_trace_id",
+                trace_id=None,
+            )
         idempotency_key = request.get("idempotency_key")
         marked_in_progress = False
 

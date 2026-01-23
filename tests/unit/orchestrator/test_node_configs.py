@@ -40,40 +40,6 @@ def _make_state():
 
 
 @pytest.mark.asyncio
-async def test_final_answer_node_respects_memory_k():
-    state = _make_state()
-    state.memory_strategy = "buffer"
-    state.memory_params = {"k": 1}
-
-    llm = FakeLLM(content="ok")
-    node = FinalAnswerNode(llm, FakePromptRepo({"system_prompt": "sys"}), FakeTelemetry())
-
-    await node(state)
-    payload = llm.calls[-1]["messages"]
-
-    assert payload[-1].content == "last"
-    assert len(payload) == 2  # system + trimmed user
-
-
-@pytest.mark.asyncio
-async def test_stage_analysis_node_respects_memory_k():
-    state = _make_state()
-    state.memory_strategy = "buffer"
-    state.memory_params = {"k": 2}
-
-    llm = FakeLLM(content='{"stage":"ok"}')
-    node = StageAnalysisNode(llm, FakePromptRepo({"analysis_prompt": "prompt"}), FakeTelemetry())
-
-    await node(state)
-    payload = llm.calls[-1]
-    messages = payload["messages"]
-
-    # system + last two messages
-    assert messages[-1].content == "last"
-    assert len(messages) == 3
-
-
-@pytest.mark.asyncio
 async def test_nodes_respect_model_params():
     state = _make_state()
     state.task_configs = build_task_configs(

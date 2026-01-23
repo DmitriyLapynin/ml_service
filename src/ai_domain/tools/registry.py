@@ -247,6 +247,14 @@ def _matches_type(value: Any, expected: str) -> bool:
 
 
 async def knowledge_search_handler(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    policies = state.get("policies") or {}
+    rag_enabled = policies.get("rag_enabled")
+    if state.get("is_rag") is False or rag_enabled is False:
+        return {
+            "status": "error",
+            "code": "rag_disabled",
+            "message": "RAG is disabled by policy",
+        }
     query = (args.get("query") or "").strip()
     top_k = int(args.get("top_k") or 5)
     top_k_per_doc = int(args.get("top_k_per_doc") or top_k)

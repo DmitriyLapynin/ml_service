@@ -1,10 +1,12 @@
 import pytest
-from ai_domain.llm.routing import LLMRouter, ModelRoute
-from ai_domain.llm.retry import RetryPolicy
+
 from ai_domain.llm.circuit_breaker import CircuitBreaker
+from ai_domain.llm.errors import LLMTimeout
 from ai_domain.llm.rate_limit import ConcurrencyLimiter
-from ai_domain.llm.errors import LLMUnavailable, LLMTimeout
+from ai_domain.llm.retry import RetryPolicy
+from ai_domain.llm.routing import LLMRouter, ModelRoute
 from ai_domain.llm.types import LLMCapabilities
+
 
 @pytest.mark.asyncio
 async def test_router_uses_primary_when_ok(base_request):

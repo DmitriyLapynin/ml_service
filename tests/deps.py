@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 
 @dataclass
 class TestDeps:
-    __test__ = False  # чтобы pytest не пытался собирать класс как тест
+    __test__: ClassVar[bool] = False  # чтобы pytest не пытался собирать класс как тест
     """
     Контейнер зависимостей для build_graph(deps).
 

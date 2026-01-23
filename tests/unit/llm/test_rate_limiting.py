@@ -1,9 +1,11 @@
-import pytest
 import asyncio
+
+import pytest
+
 
 @pytest.mark.asyncio
 async def test_concurrency_limiter_caps_parallelism():
-    from tests.conftest import CountingLimiter  # берем тестовый семафор из conftest
+    from tests.conftest import CountingLimiter
 
     limiter = CountingLimiter(max_inflight=2)
 

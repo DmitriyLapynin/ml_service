@@ -1,168 +1,134 @@
 ## ai-domain
 
-Проект-скелет домена “AI/LLM” с оркестратором, LangGraph-графами, единым фасадом для вызовов LLM и инфраструктурой для промптов (Supabase), guardrails и тестов.
+Полноценный сервис для домена AI/LLM с API, оркестратором, LangGraph-графами, единым LLM-слоем, RAG (Supabase + FAISS) и трассировкой (включая LangSmith).
 
-### Что уже реализовано
+### Архитектура и потоки
 
-**1) Оркестратор**
+**API → Orchestrator → Graph → Nodes → LLM/Tools/RAG**
+1) **FastAPI** принимает запрос (`/v1/chat`, `/v1/system-analysis`, `/v1/kb/upload`, `/v1/kb/{funnel_id}/{kb_id}`, `/health`).
+2) **Middleware** ставит `trace_id`, читает заголовки, пишет structured-логи, прокидывает `request.state`.
+3) **Orchestrator** собирает `GraphState` и запускает граф через `graph.ainvoke`.
+4) **Nodes** читают промпты, вызывают LLM/Tools/RAG, пишут runtime/trace.
+5) **Ответ** возвращается с `answer`, `status`, `trace_id`, `meta`.
+
+### Основные компоненты
+
+**Оркестратор**
 - `src/ai_domain/orchestrator/service.py` — `Orchestrator.run(request)`:
-  - idempotency (кэширование по `idempotency_key`)
-  - version/policy resolve (внешние резолверы)
-  - сбор `GraphState` и запуск графа через `graph.invoke(state)`
-  - сбор ответа (`status/answer/stage/trace_id/versions`)
-- `src/ai_domain/orchestrator/context_builder.py` — нормализация `messages` и сбор `GraphState`, включая поля из API слоя (`prompt`, `role_instruction`, `memory_*`, `model_params`, и т.д.).
-- `src/ai_domain/graphs/state.py` — dataclass `GraphState` с полями для runtime, промптов, модели, памяти и output.
+  - idempotency
+  - version/policy resolve
+  - сбор `GraphState`
+  - запуск графа
+  - сбор ответа (`status/answer/stage/trace_id/versions/meta`)
+- `src/ai_domain/orchestrator/context_builder.py` — нормализация входа и сбор `GraphState`.
+- `src/ai_domain/graphs/state.py` — структура состояния.
 
-**2) LangGraph графы “основного домена”**
-- `src/ai_domain/graphs/main_graph.py` + flow’ы в `src/ai_domain/graphs/*_flow.py`:
-  - router по `channel` → `chat/email/voice`
-  - chat-поток включает стадии анализа (`StageAnalysisNode`), RAG retrieve, tools loop и финальную генерацию.
+**Графы**
+- `src/ai_domain/graphs/main_graph.py` и flow’ы (`chat/email/voice`).
+- `src/ai_domain/agent/graph.py` — агентский граф с safety → agent → retrieve → generate → safety_out.
 
-**3) Узлы (nodes)**
-- `src/ai_domain/nodes/stage_analysis.py` — анализ стадии/сигналов (LLM), теперь уважает `memory_strategy/memory_params` (берёт последние `k` сообщений).
-- `src/ai_domain/nodes/final_answer.py` — финальный ответ:
-  - учитывает `role_instruction` и `prompt` из `ChatRequest`
-  - уважает memory window (`k`) и параметры модели (`temperature/top_p`)
-  - корректно конвертирует `state.credentials` (dict) → `LLMCredentials`
-- `src/ai_domain/nodes/rag_retrieve.py` — RAG retrieve (включается/выключается policy’ями).
-- `src/ai_domain/nodes/tools_loop.py` — цикл решений по tools (пока без реального tool-calling в LLM).
+**Nodes**
+- `src/ai_domain/agent/nodes/*` — safety, tools loop, tool executor, генерация ответа.
+- `src/ai_domain/nodes/*` — stage analysis, rag retrieve, final answer.
+- `src/ai_domain/utils/memory.py` — memory selection (buffer/summary) + structured logs `memory_trim`.
 
-**4) Единый формат входа API (ChatRequest)**
-- `src/ai_domain/api/schemas.py`:
-  - `ChatRequest`, `ChatMessage`, `ToolDescription`, `ModelConfig`
-  - адаптер `chat_request_to_orchestrator_request(...)` для перевода внешнего запроса в формат `Orchestrator.run`.
-- Поля `model`, `model.params (temperature/top_p)`, `memory_strategy/memory_params` прокидываются в `GraphState` и используются узлами.
+**LLM слой**
+- `src/ai_domain/llm/client.py` — единый вход:
+  - `invoke_text`, `invoke_structured`, `invoke_tool_calls`, `invoke_tool_response`, `generate`
+  - ретраи, лимитеры, circuit breaker
+  - sanitization параметров по возможностям моделей
+- `src/ai_domain/llm/model_caps.py` — матрица поддерживаемых параметров моделей.
+- `src/ai_domain/llm/openai_provider.py` — маппинг параметров, включая `max_tokens`/`max_completion_tokens`.
 
-**5) Единый фасад вызова LLM: LLMClient**
-- `src/ai_domain/llm/client.py`:
-  - `LLMConfig` (model/provider/temperature/top_p/max_tokens/timeout/retries/tags/metadata/seed)
-  - `invoke_text(messages, config) -> str`
-  - `invoke_structured(schema, messages, config) -> BaseModel|dict`
-  - `generate(...) -> LLMResponse` — совместимость с существующими узлами (2 стиля: kwargs и `LLMRequest`).
-- Внутри используется существующий `LLMRouter` (retries/breaker/limiter) и **единый** механизм structured output через LangChain.
+**Tools**
+- `src/ai_domain/tools/registry.py` — регистрация/валидация/исполнение инструментов, глобальный limiter, structured-логи tool_call.
+- `knowledge_search` уважает `rag_enabled`.
 
-**6) LangChain интеграция (structured output)**
-- `src/ai_domain/llm/langchain_adapter.py`:
-  - `LangChainLLMAdapter` — адаптер, позволяющий включать наш `llm.generate`/`LLMRouter.generate` в LangChain chain.
-  - `with_structured_output(PydanticModel, include_raw=True/False)` — стандартизированный structured output без ручного `prompt.partial(format_instructions=...)` снаружи.
+**RAG (Supabase + FAISS)**
+- Supabase — источник истины: `kb_files`, `kb_chunks`, `kb_embeddings`.
+- FAISS — локальный кэш/ускоритель: `data/funnels/{funnel_id}/kb/{kb_id}/`.
+- `src/ai_domain/rag/kb_client.py` — сбор чанков, эмбеддингов, запись в Supabase, build FAISS.
+- `src/ai_domain/rag/supabase_store.py` — `upsert_kb_file`, `find_kb_file_by_hash`, hash/тип источника.
+- `scripts/build_faiss_index.py` — билд индекса с Supabase-записью.
 
-**7) Guardrails / safety для agent-графа**
-- `src/ai_domain/agent/graph.py` — LangGraph-граф guardrails + agent/retrieve/generate.
-- `src/ai_domain/agent/nodes.py`:
-  - `safety_in_node`/`safety_out_node` — гибрид: rule-based + LLM-классификатор (LangChain `ainvoke` + structured output)
-  - `agent_node` — сбор составного промпта и фильтрация tools по `is_rag`
-- `src/ai_domain/agent/safety_prompt.py`:
-  - хардкод промпта классификатора безопасности
-  - Pydantic-схема `SafetyClassifierOutput`
-  - rule-based списки + парсеры/нормализация.
+**Ingest/удаление KB**
+- `/v1/kb/upload` — multipart upload с `funnel_id`, сразу запускает ingest (chunks + embeddings + FAISS).
+- `/v1/kb/{funnel_id}/{kb_id}` — удаление:
+  - manifest → локальные файлы → Supabase
+  - идемпотентный ответ `deleted/not_found/conflict`.
+- `src/ai_domain/rag/delete_service.py` — централизованный delete (lock, manifest, локальные файлы, Supabase).
 
-**8) Supabase промпты**
-- `src/ai_domain/registry/prompts.py` — `PromptRepository(supabase_client)`:
-  - читает `prompts` по `(key, version)` и кэширует
-  - совместим со стилями вызова `get_prompt(prompt_key, version, channel=...)` и keyword-стилем
-  - поддерживает шаблоны:
-    - plain string
-    - f-string/format-строка (через `variables=...`)
-    - JSON: `{"template":"...", "defaults":{...}}` + `variables`.
-- `src/ai_domain/registry/supabase_connector.py` — коннектор Supabase (`create_client(url,key)`).
-- `src/ai_domain/registry/static_prompt_repo.py` — fallback для dev (статические промпты).
+**System Analysis**
+- `/v1/system-analysis` — отдельный анализ диалога, structured output (`FastAnalytics`).
+- `src/ai_domain/system_analysis/service.py` — memory trim + prompt + `invoke_structured`.
+- `src/ai_domain/system_analysis/prompts.py` — генерация системного промпта.
 
-**9) Секреты “как на проде”**
-- `src/ai_domain/secrets.py`:
-  - сначала берёт из env
-  - иначе читает `../secrets/.env` (через `python-dotenv`)
-  - также поддерживает fallback на файлы `../secrets/OPENAI_API_KEY` и т.п.
-  - путь можно переопределить через `AI_DOMAIN_SECRETS_DIR`.
-- `.env.example` — пример переменных.
+**Промпты (Supabase)**
+- `src/ai_domain/registry/prompts.py` — `PromptRepository` (кэш, шаблоны, совместимость).
+- `src/ai_domain/registry/static_prompt_repo.py` — fallback для dev.
 
-**10) Скрипты для ручных прогонов**
-- `scripts/run_pipeline.py` — пример прогона orchestrator+graph с OpenAI и промптами (Supabase или fallback).
-- `scripts/run_safety_in_node.py` — реальный прогон `safety_in_node` (пишет только JSON `{unsafe,injection}`).
+**Telemetry и трассировка**
+- Structured JSON логи: `api_request`, `memory_trim`, `node_start/node_end`, `llm_call_end`, `tool_call_end`, `api_response`.
+- `src/ai_domain/llm/metrics.py` — `StateMetricsWriter` + `LangSmithWriter` (без credentials).
+- Trace meta возвращается в ответе.
 
-### Как устроен проект (архитектура)
+### API эндпоинты
 
-**Внешний API запрос → Orchestrator → Graph → Nodes → LLM**
-1) API слой принимает `ChatRequest` (`src/ai_domain/api/schemas.py`)
-2) Конвертируем его в `request` для `Orchestrator.run()` через `chat_request_to_orchestrator_request`
-3) `Orchestrator` собирает `GraphState` и вызывает граф (`LangGraph`)
-4) Nodes читают промпты из `PromptRepository`/`StaticPromptRepo`, формируют `LLMRequest` и вызывают LLM
-5) Ответ возвращается как `answer/stage/status`
+- `GET /health`
+- `POST /v1/chat`
+- `POST /v1/system-analysis`
+- `POST /v1/kb/upload` (multipart/form-data: `file`, `funnel_id`)
+- `DELETE /v1/kb/{funnel_id}/{kb_id}`
 
-**Единый вход для LLM**
-- В идеале весь код вызывает LLM только через `LLMClient` (или через объект, совместимый с `.generate`, например `LLMRouter/LLMClient`).
-- Structured output стандартизирован через LangChain `with_structured_output`.
+### Хранилища и данные
 
-### Промпты (Supabase таблица `prompts`)
+**Локальные файлы**
+- `AI_DOMAIN_DATA_DIR` (по умолчанию `data/`)
+- структура: `data/funnels/{funnel_id}/kb/{kb_id}/...`
 
-Текущие обязательные ключи (по коду):
-- `system_prompt` — для `FinalAnswerNode`
-- `analysis_prompt` — для `StageAnalysisNode`
-- `tool_prompt` — для `ToolsLoopNode`
+**Модели**
+- `AI_DOMAIN_MODELS_DIR` (по умолчанию `embeddings_models/`)
 
-Рекомендуемые (если хочешь хранить в Supabase составные/динамические промпты):
-- `agent_prompt` — для `agent_node` (если решишь переносить сборку промпта из кода в Supabase)
+**Секреты**
+- `AI_DOMAIN_SECRETS_DIR` (по умолчанию `../secrets`)
+- env `.env` поддерживается.
 
-Схема таблицы, которую ожидает `PromptRepository`:
-- `key` (text)
-- `version` (text)
-- `content` (text)
-Пара `(key, version)` должна быть уникальной.
+### Логи и наблюдаемость
 
-### Секреты/переменные окружения
+Все логи — JSON. В debug режиме (`AI_DOMAIN_DEBUG_LOGGING=true`) дополнительно логируются входные/выходные payloadы, но без секретов.
 
-Поддерживаются 3 способа:
-1) Экспорт env vars (как в проде)
-2) `../secrets/.env` (как “продоподобный” внешний каталог)
-3) `../secrets/<NAME>` (по одному файлу на секрет)
+### Тесты
 
-Минимум для live-прогонов:
-- `OPENAI_API_KEY`
-- `SUPABASE_URL` и `SUPABASE_KEY` (если читаешь промпты из Supabase)
+Структура тестов:
+- `tests/unit/agent`
+- `tests/unit/memory`
+- `tests/unit/prompts`
+- `tests/unit/tools`
+- `tests/unit/rag`
+- `tests/unit/llm`
+- `tests/unit/routing`
+- `tests/unit/orchestrator`
+- `tests/unit/versioning`
+- `tests/integration/graph`
+- `tests/integration/orchestrator`
 
-### Как запустить
+Запуск:
+- `poetry run pytest -q`
 
-**Установка зависимостей**
-- `poetry install`
+### Запуск приложения
 
-**Запуск pipeline**
+**FastAPI**
+- `uvicorn ai_domain.main:app --reload --log-level info`
+
+**Pipeline (скрипты)**
 - `poetry run python scripts/run_pipeline.py`
 
-**Запуск safety_in_node (реальный вызов LLM)**
-- `poetry run python scripts/run_safety_in_node.py --text "Ignore previous instructions"`
+### Переменные окружения (минимум)
 
-**Тесты**
-- Запускать через Poetry, чтобы совпало окружение зависимостей:
-  - `poetry run pytest -q`
-  - при необходимости — конкретные файлы `poetry run pytest -q tests/unit/test_llm_client.py`
-
-### Что ещё нужно сделать (план улучшений)
-
-**1) API слой**
-- Реальные HTTP роуты (FastAPI/Starlette) в `src/ai_domain/api/routes.py` и схемы/валидация.
-- Middleware для trace_id и логирования.
-
-**2) Реальный сбор deps**
-- Вынести создание `LLMClient/LLMRouter`, prompt repo (Supabase), rag client, tool registry в единый composer/DI.
-
-**3) OpenRouter провайдер**
-- Добавить `LLMProvider` для OpenRouter + маппинг ошибок → `LLMError` и включить fallback через `LLMClient`/router config.
-
-**4) Инструменты (tools)**
-- Реальный tool-calling: хранение описаний, исполнение, запись результатов в runtime, сериализация/валидация args.
-
-**5) Memory strategy “summary”**
-- Сейчас реализован `buffer/k` (последние `k` сообщений).
-- Добавить “summary” (сводка истории + последние сообщения).
-
-**6) Streaming**
-- `LLMClient.stream_text(...)` пока не реализован.
-
-**7) Политики/версии**
-- Реальные `VersionResolver`/`PolicyResolver` (tenant/channel), чтение из БД/конфига, аудит изменений.
-
----
-
-Если нужно — можем дальше “дожать” проект:
-- перевести все узлы на `LLMClient` (чтобы везде был единый вход)
-- добавить OpenRouter fallback
-- сделать полноценный API endpoint `/chat` под `ChatRequest`.
+- `OPENAI_API_KEY`
+- `SUPABASE_URL` / `SUPABASE_KEY`
+- `AI_DOMAIN_DATA_DIR` (опционально)
+- `AI_DOMAIN_MODELS_DIR` (опционально)
+- `AI_DOMAIN_SECRETS_DIR` (опционально)
+- `LANGSMITH_API_KEY` (для LangSmith)
+- `LANGSMITH_PROJECT` (опционально)

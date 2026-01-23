@@ -1,6 +1,8 @@
 import pytest
-from ai_domain.llm.retry import with_retries, RetryPolicy
-from ai_domain.llm.errors import LLMTimeout, LLMInvalidRequest
+
+from ai_domain.llm.errors import LLMInvalidRequest, LLMTimeout
+from ai_domain.llm.retry import RetryPolicy, with_retries
+
 
 @pytest.mark.asyncio
 async def test_with_retries_succeeds_after_failures():
@@ -15,6 +17,7 @@ async def test_with_retries_succeeds_after_failures():
     res = await with_retries(fn, policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, max_delay_s=0.0))
     assert res == "ok"
     assert calls["n"] == 3
+
 
 @pytest.mark.asyncio
 async def test_with_retries_does_not_retry_non_retryable():

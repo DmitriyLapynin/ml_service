@@ -6,6 +6,7 @@ from typing import List
 from ai_domain.llm.client import LLMConfig
 from ai_domain.llm.types import LLMCallContext
 from ai_domain.tools.registry import ToolSpec, default_registry
+from ai_domain.utils.memory import select_memory_messages
 
 from .prompts import create_agent_prompt, create_agent_prompt_short
 from ai_domain.llm.metrics import StateMetricsWriter
@@ -84,23 +85,7 @@ async def agent_node(state: dict) -> dict:
     state.setdefault("trace", {}).setdefault("agent", {})
 
     if use_tool_calls and state["filtered_tools"]:
-        full_messages = state.get("messages") or []
-        history = full_messages[-5:]
-        trimmed = len(full_messages) - len(history)
-        if trimmed > 0:
-            logging.info(
-                json.dumps(
-                    {
-                        "event": "messages_trimmed",
-                        "trace_id": state.get("trace_id"),
-                        "node": "agent",
-                        "trimmed_count": trimmed,
-                        "kept_count": len(history),
-                        "total_count": len(full_messages),
-                    },
-                    ensure_ascii=False,
-                )
-            )
+        history = select_memory_messages(state)
         trace_id = state.get("trace_id")
         call_context = (
             LLMCallContext(

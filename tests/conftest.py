@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List
 
 from ai_domain.llm.base import LLMProvider
@@ -30,13 +30,9 @@ def base_request():
 @dataclass
 class FakeLLMProvider(LLMProvider):
     name: str = "fake"
-    script: List[Any] = None
+    script: List[Any] = field(default_factory=lambda: ["ok"])
     latency_ms: int = 1
-    capabilities: LLMCapabilities = LLMCapabilities()
-
-    def __post_init__(self):
-        if self.script is None:
-            self.script = ["ok"]
+    capabilities: LLMCapabilities = field(default_factory=LLMCapabilities)
 
     async def generate(self, req: LLMRequest) -> LLMResponse:
         await asyncio.sleep(0)
@@ -74,3 +70,32 @@ class CountingLimiter:
             self.current -= 1
         self._sem.release()
         return False
+
+
+@pytest.fixture
+def fake_provider():
+    return FakeLLMProvider()
+
+
+@pytest.fixture
+def tmp_data_dir(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("AI_DOMAIN_DATA_DIR", str(data_dir))
+    return data_dir
+
+
+@pytest.fixture
+def tmp_models_dir(tmp_path, monkeypatch):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    monkeypatch.setenv("AI_DOMAIN_MODELS_DIR", str(models_dir))
+    return models_dir
+
+
+@pytest.fixture
+def tmp_secrets_dir(tmp_path, monkeypatch):
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    monkeypatch.setenv("AI_DOMAIN_SECRETS_DIR", str(secrets_dir))
+    return secrets_dir
